@@ -1,0 +1,58 @@
+# /skills 面板：项目级 skill 开关
+
+一句话：`/skills` 让你**按项目**开关当前会话加载的 skill（superpowers、包内 skill、
+`~/.agents` 用户级 skill 等）。原理是把开关写进 `<项目>/.pi/settings.json`，与
+`pi config -l` 使用**同款机制**——**完全项目隔离，绝不碰全局配置**，其他项目不受影响。
+修改后需 `/reload`（或开新会话）生效。
+
+## 1. 命令
+
+- `/skills` — 打开面板：
+  - `↑/↓` 或 `PgUp/PgDn` 选择；`/` 过滤（按名称/描述）；`Esc` 取消。
+  - `Space` 循环当前行的状态：`●` 默认（继承）→ `○` 关 → `⊙` 强制开 → `●`。
+  - `Enter` 保存（写入 `.pi/settings.json`，提示运行 `/reload` 生效）。
+  - 标签含义：`[项目]` 本项目 `.pi/skills`；`[全局]` 用户级（`~/.pi/agent/skills`、
+    `~/.agents/skills`）；`[包]` npm/git 包内的 skill；`[其他]` 只读来源（见 §5）。
+- `/skills:on <名字...>` — 强制开启指定 skill（名称区分大小写不敏感，多个用空格分隔）。
+- `/skills:off <名字...>` — 关闭指定 skill。
+- `/skills:reset` — 移除**本插件写入的**全部 skill 覆盖（恢复默认；其他键不动）。
+
+## 2. 开关落在 settings 的哪个位置
+
+| skill 来源 | settings.json 里的形式 |
+|---|---|
+| 项目 skill（`.pi/skills/...`） | `"skills": ["+skills/xxx/SKILL.md"]`（关：`-skills/xxx/SKILL.md`） |
+| 用户级（`~/.agents`、`~/.pi/agent/skills`） | `"skills": ["<SKILL.md 绝对路径>", "±<同路径>"]`（**成对**，单条 `-` 不生效） |
+| 包内（npm/git 包） | `"packages": [{"source": "git:…/npm:…", "skills": ["±相对路径"]}]`（还原时退回纯字符串条目） |
+
+回读规则（与 pi 一致）：匹配条目取**最后一个**——普通/`+` → 强制开，`-` → 关，
+无条目 → 继承默认；`-` 与 `+` 同时出现时 `-` 优先（后写的赢）。
+
+## 3. 状态语义
+
+- **● 默认（继承）**：不设覆盖，跟随全局/包默认加载规则。
+- **⊙ 强制开（on-project）**：即使来源默认关闭，本项目也加载。
+- **○ 强制关（off-project）**：本项目不加载该 skill。
+
+## 4. 只读项（面板可看不可改）
+
+- 带 `disableModelInvocation` 的 skill——它由包控制注入，开关对其无运行时效果。
+- 包外自定义路径（`--skill` 传入、未知目录）的 skill——没有项目级覆盖可写。
+
+## 5. 限制（v1）
+
+- 默认目录里**嵌套 ≥2 层**的 skill 不在扫描列表（默认目录按一层扫描）。
+- 面板首次使用需先触发一次 `before_agent_start`——**先发一条消息**再开面板。
+- 本插件不管理 `disableModelInvocation` 本身。
+
+## 6. 故障排查
+
+- **settings 被手改坏（非法 JSON）**：插件会提示"settings.json 解析失败"并
+  **拒绝写入**（文件保持原样）。恢复：手工修复 JSON，或删除其中的 `skills` 键
+  /`packages` 对象条目里的 `skills` 子键（插件只写这两种形态）。
+- **`/skills:reset` 的行为与边界**：只清插件形态的覆盖（`skills` 里的 `±` 条目及
+  成对的绝对路径 plain 条目；`packages` 对象条目里的 `skills` 子键）。相对路径的
+  plain 条目、你手写的 `autoload`/`extensions` 等其他键**一律保留**；重置后
+  `/reload` 恢复默认加载。
+- 开关不生效？确认已 `/reload`；包内 skill 只认 `packages` 对象条目，
+  写在顶层 `skills` 里无效。
