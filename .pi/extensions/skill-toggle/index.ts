@@ -62,7 +62,11 @@ export interface SkillKind {
 }
 
 function under(base: string, sub: string, p: string): boolean {
-  return p === `${base}/${sub}` || p.startsWith(`${base}/${sub}/`);
+  // Strip trailing separators from base so a base like "C:/proj/" still
+  // yields the prefix "c:/proj/.pi" (M1: un-normalized input would build
+  // "c:/proj//.pi" and misclassify to `other`).
+  const b = base.replace(/[/\\]+$/, "");
+  return p === `${b}/${sub}` || p.startsWith(`${b}/${sub}/`);
 }
 
 /**
@@ -269,6 +273,34 @@ function projectInstallRoot(source: string, projectDir: string): string | null {
   return null;
 }
 
+/**
+ * Install roots to scan for package skills, per source string.
+ * Project entries win over global ones by source identity (mirror pi
+ * dedupePackages:1492): a source declared in BOTH the project and the global
+ * settings is scanned ONLY under its project install root — scanning the
+ * shadowed global root too could surface skills whose toggle writes to the
+ * project entry while pi resolves them from the global root (toggle no-op).
+ */
+export function packageScanRoots(
+  projectSources: string[],
+  globalSources: string[],
+  projectDir: string,
+  homeDir: string,
+): { installRoot: string; packageSource: string }[] {
+  const projectSet = new Set(projectSources);
+  const out: { installRoot: string; packageSource: string }[] = [];
+  for (const source of projectSources) {
+    const root = projectInstallRoot(source, projectDir);
+    if (root) out.push({ installRoot: root, packageSource: source });
+  }
+  for (const source of globalSources) {
+    if (projectSet.has(source)) continue; // shadowed by the project entry
+    const root = findPackageInstallRoot(source, projectDir, homeDir);
+    if (root) out.push({ installRoot: root, packageSource: source });
+  }
+  return out;
+}
+
 // --- scan fallback -----------------------------------------------------------
 
 interface ScanDir {
@@ -412,7 +444,13 @@ export function buildSkillCache(
     const baseDir = sk.sourceInfo?.baseDir || sk.baseDir || dirname(sk.filePath);
     const { kind, tag } = classifyKind(baseDir, "x", projectDir, home, sk.sourceInfo);
     add({
-      name: sk.name,
+      // I1 (deferred from Task 3): skills without a frontmatter `name` fall
+      // back to the parent directory name (pi: `frontmatterName ||
+      // parentDirName`). basename()/dirname() handle native separators.
+      // (Inline in the before_agent_start handler — not unit-testable as a
+      // pure function; the same fallback is exercised in the scan paths by
+      // task3/task35 tests via scanSkillDirs/scanPackageSkillDirs.)
+      name: sk.name || basename(dirname(sk.filePath)),
       filePath: sk.filePath,
       baseDir,
       source: tag,
@@ -464,13 +502,10 @@ export function buildSkillCache(
     scannedRoots.add(key);
     for (const entry of scanPackageSkillDirs(installRoot, packageSource)) add(entry);
   };
-  for (const source of projectPkgs) {
-    const root = projectInstallRoot(source, projectDir);
-    if (root) scanPackageRoot(root, source);
-  }
-  for (const source of globalPkgs) {
-    const root = findPackageInstallRoot(source, projectDir, home);
-    if (root) scanPackageRoot(root, source);
+  // packageScanRoots mirrors pi dedupePackages: a source in both the project
+  // and global settings is scanned only under the project install root.
+  for (const { installRoot, packageSource } of packageScanRoots(projectPkgs, globalPkgs, projectDir, home)) {
+    scanPackageRoot(installRoot, packageSource);
   }
 
   const order: Record<string, number> = { project: 0, user: 1, package: 2, other: 3 };

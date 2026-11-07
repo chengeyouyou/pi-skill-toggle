@@ -234,6 +234,9 @@ export function resolveState(
     if (!pkg || typeof pkg !== "object") return "on";
     const entries = pkg.skills;
     if (!Array.isArray(entries)) return "on";
+    // pi config-selector.js:622-623 (emptyArrayIsUnload): a hand-edited
+    // `{source, skills: []}` entry reads as OFF, not inherit — align readback.
+    if (entries.length === 0) return "off-project";
     return stateFromEntries(entries, skillPattern(skill, "package"));
   }
   return stateFromEntries(skills, skillPattern(skill, kind));
@@ -307,8 +310,13 @@ function applyPackage(
     pkgIndex = out.packages.length - 1;
   }
   const existing = out.packages[pkgIndex];
+  // CLONE object entries before mutating: applyState must not mutate the
+  // caller's input objects (a second applyState on the same in-memory
+  // objects would otherwise read already-modified `skills`).
   const pkg =
-    typeof existing === "string" ? { source: existing } : (existing as Record<string, unknown>);
+    typeof existing === "string"
+      ? { source: existing }
+      : { ...(existing as Record<string, unknown>) };
   out.packages[pkgIndex] = pkg;
   const skills = Array.isArray(pkg.skills) ? pkg.skills : [];
   const updated = skills.filter((entry) => !matchesTarget(entryTarget(entry), pattern));

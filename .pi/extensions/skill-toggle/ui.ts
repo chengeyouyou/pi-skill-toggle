@@ -243,12 +243,16 @@ export function openSkillsPanel(
   ctx: ExtensionContext,
   options: SkillsPanelOptions,
 ): Promise<PanelResult> {
+  // Read + parse the project settings ONCE per panel open (M1: calling
+  // readProjectSettings inside the map below re-read the file per skill).
+  const { skills: settingSkills, packages: settingPackages } = readProjectSettings(
+    options.projectSettingsPath,
+  );
   const component = createSkillsPanel({
     skills: options.skills.map((s) => {
-      const { skills: sk, packages: pk } = readProjectSettings(options.projectSettingsPath);
       return {
         ...s,
-        state: resolveState(s, sk, pk),
+        state: resolveState(s, settingSkills, settingPackages),
         description: (s as { description?: string }).description ?? "",
       };
     }),

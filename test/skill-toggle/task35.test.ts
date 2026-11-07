@@ -17,6 +17,7 @@ import { join, relative } from "node:path";
 import {
   classifyKind,
   findPackageInstallRoot,
+  packageScanRoots,
   type SkillKind,
 } from "../../.pi/extensions/skill-toggle/index.ts";
 import {
@@ -166,6 +167,28 @@ test("classifyKind: git install root + matching git source → package (scan-uni
   );
 });
 
+test("classifyKind: base dirs with trailing separators still classify (M1)", () => {
+  // Trailing slash on projectDir: un-normalized input would build the prefix
+  // "c:/proj//.pi" and misclassify project skills to `other`.
+  assert.deepEqual<SkillKind>(
+    classifyKind(join(PROJECT, ".pi", "skills", "f"), "x", `${PROJECT}/`, HOME),
+    { kind: "project", tag: "project" },
+  );
+  assert.deepEqual<SkillKind>(
+    classifyKind(join(PROJECT, ".agents", "skills", "f"), "x", `${PROJECT}/`, HOME),
+    { kind: "project", tag: "agents" },
+  );
+  assert.deepEqual<SkillKind>(
+    classifyKind(join(HOME, ".agents", "skills", "f"), "x", PROJECT, `${HOME}/`),
+    { kind: "user", tag: "agents" },
+  );
+  // posix-style trailing slash
+  assert.equal(
+    classifyKind("/proj/.pi/skills/f", "x", "/proj/", "/home").kind,
+    "project",
+  );
+});
+
 // --- user kind: pair semantics ---------------------------------------------------
 
 test("user: off → exactly [abs, -abs] (plain first), dirty state normalized to pair", () => {
@@ -312,6 +335,32 @@ test("package: inherit with no matching entry → no new entry created", () => {
   assert.deepEqual(r.packages, [otherPkg]);
 });
 
+test("package: input package objects are NOT mutated by applyState (regression)", () => {
+  // Deep-freeze the input objects so any in-place mutation throws.
+  const objEntry = Object.freeze({ source: PKG_SOURCE, skills: Object.freeze([`+${PKG_REL}`]) });
+  const frozenInput = Object.freeze([otherPkg, objEntry]);
+  const mkInput = () => ({ skills: Object.freeze<string[]>([]), packages: frozenInput as unknown[] });
+  // Apply twice with the SAME input objects (no re-parse between), toggling
+  // a second package skill's state in between is not needed — the bug was
+  // reading already-modified `skills` on the second call.
+  const s2: SkillEntry = { ...packageSkill(), name: "brainstorming", filePath: PKG_SKILL_FILE };
+  const r1 = applyState(s2, "off-project", mkInput());
+  assert.deepEqual(r1.packages, [otherPkg, { source: PKG_SOURCE, skills: [`-${PKG_REL}`] }]);
+  const r2 = applyState(s2, "off-project", mkInput());
+  // Second call must be identical — without the clone it would read the
+  // already-modified input object and produce different (corrupted) output.
+  assert.deepEqual(r2.packages, r1.packages);
+  // Inputs themselves unchanged (deep-equal to the frozen originals).
+  assert.deepEqual(frozenInput, [otherPkg, { source: PKG_SOURCE, skills: [`+${PKG_REL}`] }]);
+  // The object ENTRY in the output is the clone, not the caller's frozen object.
+  const outPkg = r1.packages[1] as Record<string, unknown>;
+  assert.notEqual(outPkg, objEntry);
+  // And toggling back to inherit also leaves the input untouched.
+  const r3 = applyState(s2, "on", mkInput());
+  assert.deepEqual(r3.packages, [otherPkg, PKG_SOURCE]);
+  assert.deepEqual(frozenInput, [otherPkg, { source: PKG_SOURCE, skills: [`+${PKG_REL}`] }]);
+});
+
 test("package: readback — string → inherit; object skills last entry wins", () => {
   assert.equal(resolveState(packageSkill(), [], [PKG_SOURCE]), "on");
   assert.equal(resolveState(packageSkill(), [], [{ source: PKG_SOURCE, skills: [`-${PKG_REL}`] }]), "off-project");
@@ -329,6 +378,16 @@ test("package: readback — string → inherit; object skills last entry wins", 
   // skills-array entries never affect package state (runtime no-op lane)
   assert.equal(resolveState(packageSkill(), [join("skills", "brainstorming", "SKILL.md")], [PKG_SOURCE]), "on");
   assert.equal(resolveState(packageSkill(), [], [{ source: PKG_SOURCE, autoload: false }]), "on");
+});
+
+test("package: readback — {source, skills: []} reads as off-project (mirror pi emptyArrayIsUnload)", () => {
+  // pi config-selector.js:622-623 reads an empty skills array as OFF, not inherit.
+  assert.equal(resolveState(packageSkill(), [], [{ source: PKG_SOURCE, skills: [] }]), "off-project");
+  // other resource keys present + empty skills → same alignment
+  assert.equal(
+    resolveState(packageSkill(), [], [{ source: PKG_SOURCE, skills: [], prompts: ["p1"] }]),
+    "off-project",
+  );
 });
 
 // --- parseSettings: packages -----------------------------------------------------
@@ -360,6 +419,23 @@ test("parseSettings: packages null → []; non-array → ok:false", () => {
 });
 
 // --- state cycle -------------------------------------------------------------------
+
+test("packageScanRoots: source in both project and global → project root ONLY (mirror dedupePackages)", () => {
+  const projRoot = join(PROJECT, ".pi", "git", "github.com", "obra", "superpowers");
+  const globalRoot = join(HOME, ".pi", "agent", "git", "github.com", "obra", "superpowers");
+  const roots = packageScanRoots([PKG_SOURCE], [PKG_SOURCE, otherPkg], PROJECT, HOME);
+  assert.deepEqual(roots, [
+    { installRoot: projRoot, packageSource: PKG_SOURCE },
+    { installRoot: join(HOME, ".pi", "agent", "npm", "node_modules", "@scope", "other"), packageSource: otherPkg },
+  ]);
+  assert.ok(!roots.some((r) => r.installRoot === globalRoot));
+  // Project-only source → project root; global-only source → global root.
+  const roots2 = packageScanRoots([], [PKG_SOURCE, otherPkg], PROJECT, HOME);
+  assert.deepEqual(roots2, [
+    { installRoot: globalRoot, packageSource: PKG_SOURCE },
+    { installRoot: join(HOME, ".pi", "agent", "npm", "node_modules", "@scope", "other"), packageSource: otherPkg },
+  ]);
+});
 
 test("nextState cycle: on → off-project → on-project → on; read-only → null", () => {
   const s = projectSkill();
