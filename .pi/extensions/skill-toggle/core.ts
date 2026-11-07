@@ -164,8 +164,8 @@ function packageObjectFor(
 const DELETE_PKG_ENTRY = Symbol("delete-package-entry");
 
 /** Shared resource-key presence check (applyState finalization + Task 4 reset). */
-function hasResourceKeys(pkg: Record<string, unknown>, except?: string): boolean {
-  return RESOURCE_TYPE_KEYS.some((key) => key !== except && pkg[key] !== undefined);
+function hasResourceKeys(pkg: Record<string, unknown>): boolean {
+  return RESOURCE_TYPE_KEYS.some((key) => pkg[key] !== undefined);
 }
 
 type PkgFinalization = string | typeof DELETE_PKG_ENTRY | null;
@@ -419,6 +419,9 @@ function isAbsolutePattern(p: string): boolean {
  *   autoload-less entry reverts and autoload===false splices the entry;
  *   reset is a pure override-clearing pass, not a write).
  *   String entries are passed through untouched.
+ *   A package with `skills: null` (hand-edited) counts as "no override"
+ *   and is kept as-is (`== null` gate), consistent with treating a null
+ *   resource key as absent.
  * - removed = number of removed skills-array entries (incl. co-removed
  *   plain pairs) + number of removed `skills` keys.
  */
@@ -427,9 +430,9 @@ export function clearOverrides(input: {
   packages: unknown[];
 }): { skills: string[]; packages: unknown[]; removed: number } {
   let removed = 0;
-  const removedTargets = new Set<string>();
+  const removedTargets: string[] = [];
   for (const entry of input.skills) {
-    if (entry.startsWith("+") || entry.startsWith("-")) removedTargets.add(entry.slice(1));
+    if (entry.startsWith("+") || entry.startsWith("-")) removedTargets.push(entry.slice(1));
   }
   const skills = input.skills.filter((entry) => {
     if (entry.startsWith("+") || entry.startsWith("-")) {
@@ -438,7 +441,7 @@ export function clearOverrides(input: {
     }
     if (
       !isPrefixed(entry) &&
-      removedTargets.has(entry) &&
+      removedTargets.some((t) => matchesTarget(entry, t)) &&
       isAbsolutePattern(entry)
     ) {
       removed++;
@@ -453,13 +456,13 @@ export function clearOverrides(input: {
       continue;
     }
     const pkg = { ...(entry as Record<string, unknown>) };
-    if (pkg.skills === undefined) {
+    if (pkg.skills == null) {
       packages.push(entry); // no override to clear — keep the ORIGINAL object
       continue;
     }
     delete pkg.skills;
     removed++;
-    if (hasResourceKeys(pkg, "skills") || pkg.autoload !== undefined) {
+    if (hasResourceKeys(pkg) || pkg.autoload !== undefined) {
       packages.push(pkg); // explicit package config — keep the object
     } else if (typeof pkg.source === "string") {
       packages.push(pkg.source); // nothing but source left → plain string

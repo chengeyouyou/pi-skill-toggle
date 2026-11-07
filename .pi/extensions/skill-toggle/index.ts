@@ -631,9 +631,8 @@ export default function (pi: ExtensionAPI) {
     const projectSettingsPath = join(ctx.cwd, ".pi", "settings.json");
     const data = readProjectSettingsOnce(ctx, projectSettingsPath);
     if (data === null) return;
-    const done = plan.resolved.map((r) => (r.target === "on-project" ? "✓ 开" : "✓ 关"));
     const summary = plan.resolved
-      .map((r, i) => `${r.skill.name} ${done[i]}`)
+      .map((r) => `${r.skill.name} ${r.target === "on-project" ? "✓ 开" : "✓ 关"}`)
       .join(", ");
     applyAndSave(
       ctx,
@@ -661,14 +660,14 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("skills:on", {
-    description: "强制开启指定 skill（/skills:on <名称...>）",
+    description: "强制开启指定 skill（/skills:on <名称...>，名称中不能含空格）",
     async handler(args: string, ctx: ExtensionCommandContext) {
       await runToggles("on")(args, ctx);
     },
   });
 
   pi.registerCommand("skills:off", {
-    description: "关闭指定 skill（/skills:off <名称...>）",
+    description: "关闭指定 skill（/skills:off <名称...>，名称中不能含空格）",
     async handler(args: string, ctx: ExtensionCommandContext) {
       await runToggles("off")(args, ctx);
     },

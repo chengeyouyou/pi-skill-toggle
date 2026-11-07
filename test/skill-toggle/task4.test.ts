@@ -134,6 +134,18 @@ test("clearOverrides: absolute plain NOT co-removed when no matching ± entry ex
   assert.equal(out.removed, 0);
 });
 
+test("clearOverrides: cross-separator pair (plain backslash vs -entry slash) → both removed", () => {
+  const plainBackslash = USER_ABS.replaceAll("/", "\\"); // hand-edited settings, opposite separator
+  for (const [plain, prefixed] of [
+    [plainBackslash, `-${USER_ABS}`],
+    [USER_ABS, `-${plainBackslash}`],
+  ] as const) {
+    const out = clearOverrides({ skills: [plain, prefixed], packages: [] });
+    assert.deepEqual(out.skills, [], `both entries must be removed: ${JSON.stringify(out.skills)}`);
+    assert.equal(out.removed, 2);
+  }
+});
+
 test("clearOverrides: packages — drop skills key, revert to string, keep object with autoload (true/false)/other keys, plain strings untouched", () => {
   const out = clearOverrides({
     skills: [],
@@ -280,6 +292,20 @@ test("wiring: /skills:reset with nothing to clear → warning, file untouched", 
   setSkillCache(ALL_SKILLS);
   await handlers["skills:reset"]("", h.ctx);
   assert.equal(readFileSync(h.settingsPath, "utf-8"), before);
+  assert.ok(
+    h.notifyLog.some(([m, k]) => m === "没有可移除的 skill 覆盖" && k === "warning"),
+    `notify: ${JSON.stringify(h.notifyLog)}`,
+  );
+  setSkillCache([]);
+});
+
+test("wiring: /skills:reset with settings file MISSING → warning, no crash, no file created", async () => {
+  const { handlers } = loadExtension();
+  const h = ctxWithDir(); // no settings.json at all
+  assert.ok(!existsSync(h.settingsPath));
+  setSkillCache(ALL_SKILLS);
+  await handlers["skills:reset"]("", h.ctx);
+  assert.ok(!existsSync(h.settingsPath), "reset with removed===0 must not create the file");
   assert.ok(
     h.notifyLog.some(([m, k]) => m === "没有可移除的 skill 覆盖" && k === "warning"),
     `notify: ${JSON.stringify(h.notifyLog)}`,
