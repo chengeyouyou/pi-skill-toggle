@@ -113,8 +113,12 @@ export function parseSettings(raw: string):
   return { ok: true, data, skills: skills as string[] };
 }
 
+export function settingsTmpPath(absPath: string): string {
+  return `${absPath}.tmp-${process.pid}`;
+}
+
 export function saveSettingsSync(data: Record<string, unknown>, absPath: string): void {
-  const tmpPath = `${absPath}.tmp-${process.pid}`;
+  const tmpPath = settingsTmpPath(absPath);
   writeFileSync(tmpPath, JSON.stringify(data, null, 2) + "\n", "utf-8");
   renameSync(tmpPath, absPath);
 }

@@ -15,6 +15,8 @@ import {
   nextState,
   applyState,
   patternFor,
+  visibleSkills,
+  pageSlice,
   type SkillEntry,
 } from "../../.pi/extensions/skill-toggle/core.ts";
 
@@ -230,8 +232,6 @@ test("applyState: read-only target removes matching entries, appends nothing (sp
 });
 
 // --- visibleSkills -----------------------------------------------------------
-
-import { visibleSkills, pageSlice } from "../../.pi/extensions/skill-toggle/core.ts";
 
 function mk(name: string, description = ""): SkillEntry {
   return { name, filePath: `/proj/.pi/skills/${name}/SKILL.md`, baseDir: "/proj/.pi", source: "project", ...(description ? { description } : {}) } as SkillEntry & { description?: string };

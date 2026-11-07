@@ -6,12 +6,33 @@
 // The component is a PLAIN OBJECT (render/handleInput/invalidate) — no pi-tui
 // import, no class — so tests can drive it directly via a stub `ui.custom`.
 //
-// Key sequences are pi-tui legacy terminal codes (pi 1.5.0
-// @earendil-works/pi-tui dist/keys.js, LEGACY_KEY_SEQUENCES / matchesKey):
-//   Enter "\r"   Esc "\x1b"   Space " "   Backspace "\x7f"
-//   Up "\x1b[A"  Down "\x1b[B"  PgUp "\x1b[5~"  PgDn "\x1b[6~"
-//   Home "\x1b[H"  End "\x1b[F"
-import { readFileSync } from "node:fs";
+// Key matching handles BOTH encodings pi-tui forwards raw (the TUI does not
+// normalize before component.handleInput, and pi 1.5.0 activates the Kitty
+// keyboard protocol on every terminal start — terminal.js setKittyProtocolActive
+// (true), so Kitty-capable terminals (kitty, WezTerm, foot, …) send CSI-u):
+//   legacy  (pi-tui dist/keys.js LEGACY_KEY_SEQUENCES): Enter "\r", Esc "\x1b",
+//     Space " ", Backspace "\x7f", Up "\x1b[A", Down "\x1b[B", PgUp "\x1b[5~",
+//     PgDn "\x1b[6~", Home "\x1b[H", End "\x1b[F"
+//   Kitty CSI-u (pi-tui dist/keys.js parseKittySequence / decodeKittyPrintable):
+//     ESC [ <codepoint> [ : <shifted> [ : <base> ] ] ; <mod> [ : <event> ] u,
+//     codepoints esc 27, enter 13, space 32, backspace 127, up -1, down -2,
+//     pageUp -12, pageDown -13, home -14, end -15; printable keys decode to the
+//     plain character (plain or shift-only, shifted codepoint preferred).
+// Route taken (review finding #1): the `keybindings` manager passed to the
+// ctx.ui.custom factory is used first — its matches(data, bindingId) calls
+// pi-tui's matchesKey (same idiom as pi's own dist config-selector, which
+// calls kb.matches(data, "tui.select.up") / matchesKey(data, "ctrl+c")). It
+// resolves both legacy and Kitty encodings. Default bindings verified in this
+// install (dist/core/keybindings.js KEYBINDINGS): tui.select.up=up, down=down,
+// pageUp=pageUp, pageDown=pageDown, tui.select.confirm=enter,
+// tui.select.cancel=[escape, ctrl+c]. Space has no default binding, so it
+// stays on the local table. When the factory is called without a real
+// manager (component-driven unit tests pass {}), the local matchers take
+// over; they mirror the exact forms pi-tui dist/keys.js accepts, because
+// @earendil-works/pi-tui is NOT importable from project extensions in this
+// deployment (the jiti loader aliases it only in pi's built node_modules
+// mode; Node resolution from .pi/extensions/ fails).
+import { readFileSync, unlinkSync } from "node:fs";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import {
@@ -21,6 +42,7 @@ import {
   parseSettings,
   resolveState,
   saveSettingsSync,
+  settingsTmpPath,
   visibleSkills,
   type SkillEntry,
   type ToggleState,
@@ -60,6 +82,138 @@ const K = {
   end: "\x1b[F",
 } as const;
 
+type SpecialKey = keyof typeof K;
+
+// Legacy raw string → key (pi-tui keys.js LEGACY_KEY_SEQUENCES forms).
+const LEGACY_KEY: Record<string, SpecialKey> = Object.fromEntries(
+  Object.entries(K).map(([key, seq]) => [seq, key]),
+) as Record<string, SpecialKey>;
+
+// CSI-u form accepted by pi-tui keys.js parseKittySequence (flag 1/2/4 combos):
+// \x1b[<codepoint>[:<shifted>[:<base>]];<mod>[:<event>]u
+const KITTY_CSI_U = /^\x1b\[(\d+)(?::(\d*))?(?::(\d+))?(?:;(\d+))?(?::(\d+))?u$/;
+// Kitty functional-key codepoints (pi-tui keys.js FUNCTIONAL/ARROW_CODEPOINTS),
+// only the keys the panel uses.
+const KITTY_KEY_CODEPOINTS: Record<number, SpecialKey> = {
+  27: "esc", // CODEPOINTS.escape
+  13: "enter", // CODEPOINTS.enter
+  32: "space", // CODEPOINTS.space
+  127: "backspace", // CODEPOINTS.backspace
+  [-1]: "up", // ARROW_CODEPOINTS.up
+  [-2]: "down", // ARROW_CODEPOINTS.down
+  [-12]: "pageUp", // FUNCTIONAL_CODEPOINTS.pageUp
+  [-13]: "pageDown", // FUNCTIONAL_CODEPOINTS.pageDown
+  [-14]: "home", // FUNCTIONAL_CODEPOINTS.home
+  [-15]: "end", // FUNCTIONAL_CODEPOINTS.end
+};
+const LOCK_MASK = 64 + 128; // Caps Lock + Num Lock (keys.js)
+const KITTY_PRINTABLE_ALLOWED_MODIFIERS = 1 | LOCK_MASK; // shift | locks
+// Kitty sends the arrow/page/home/end keys as PUA codepoints (57344-63743);
+// pi-tui keys.js normalizeKittyFunctionalCodepoint maps them onto the same
+// logical codepoints it uses for the negative FUNCTIONAL/ARROW_CODEPOINTS.
+const KITTY_FUNCTIONAL_KEY_EQUIVALENTS: Record<number, number> = {
+  57419: -1, // up
+  57420: -2, // down
+  57421: -12, // pageUp
+  57422: -13, // pageDown
+  57423: -14, // home
+  57424: -15, // end
+};
+
+function kittyCsiU(
+  data: string,
+): { codepoint: number; shifted?: number; modifier: number } | undefined {
+  const m = data.match(KITTY_CSI_U);
+  if (!m) return undefined;
+  let codepoint = Number.parseInt(m[1] ?? "", 10);
+  if (!Number.isFinite(codepoint)) return undefined;
+  codepoint = KITTY_FUNCTIONAL_KEY_EQUIVALENTS[codepoint] ?? codepoint;
+  const shifted =
+    m[2] && m[2].length > 0 ? Number.parseInt(m[2], 10) : undefined;
+  const modValue = m[4] ? Number.parseInt(m[4], 10) : 1;
+  return {
+    codepoint,
+    shifted,
+    modifier: Number.isFinite(modValue) ? modValue - 1 : 0,
+  };
+}
+
+/** Special-key match for Kitty CSI-u input (plain key only, as pi-tui's matchesKittySequence(cp, 0) does). */
+function kittySpecialKey(data: string): SpecialKey | undefined {
+  const k = kittyCsiU(data);
+  if (!k) return undefined;
+  if ((k.modifier & ~LOCK_MASK) !== 0) return undefined;
+  return KITTY_KEY_CODEPOINTS[k.codepoint];
+}
+
+/**
+ * Decode a Kitty CSI-u sequence to a printable character, mirroring pi-tui
+ * keys.js decodeKittyPrintable: plain or shift-only, shifted codepoint
+ * preferred when shift is held, codepoint >= 32, functional PUA dropped.
+ */
+function kittyPrintable(data: string): string | undefined {
+  const k = kittyCsiU(data);
+  if (!k) return undefined;
+  if ((k.modifier & ~KITTY_PRINTABLE_ALLOWED_MODIFIERS) !== 0) return undefined;
+  const effective =
+    (k.modifier & 1) !== 0 && k.shifted !== undefined ? k.shifted : k.codepoint;
+  if (effective < 32 || (effective >= 57344 && effective <= 63743)) return undefined;
+  try {
+    return String.fromCodePoint(effective);
+  } catch {
+    return undefined;
+  }
+}
+
+// pi-tui keybinding ids (dist config-selector uses the same "tui.select.*"
+// ids): up/down/pageUp/pageDown navigation, confirm (default "enter") and
+// cancel (default "escape"). Space/Backspace are resolved via the local
+// legacy + CSI-u table (Space has no default binding; Backspace is editor
+// input, not a select binding).
+const KB_BINDING: Record<SpecialKey, string | null> = {
+  up: "tui.select.up",
+  down: "tui.select.down",
+  pageUp: "tui.select.pageUp",
+  pageDown: "tui.select.pageDown",
+  enter: "tui.select.confirm",
+  esc: "tui.select.cancel",
+  space: null,
+  backspace: null,
+};
+
+/**
+ * Raw input → the panel's special key, if any.
+ * `keybindings` (pi-tui KeybindingsManager, when the real TUI provides one)
+ * is consulted first; its matches() routes through pi-tui's matchesKey and
+// handles both legacy and Kitty encodings. Fallback: the local mirror table
+ * (unit tests pass no manager).
+ */
+function resolveKey(
+  data: string,
+  keybindings?: { matches: (data: string, bindingId: string) => boolean } | null,
+): SpecialKey | undefined {
+  if (keybindings) {
+    try {
+      for (const key of Object.keys(KB_BINDING) as SpecialKey[]) {
+        const bindingId = KB_BINDING[key];
+        if (bindingId && keybindings.matches(data, bindingId)) return key;
+      }
+    } catch {
+      /* malformed stub — fall through to the local table */
+    }
+  }
+  return LEGACY_KEY[data] ?? kittySpecialKey(data);
+}
+
+/** Plain single char OR Kitty CSI-u printable → the character to type. */
+function printableChar(data: string): string | undefined {
+  if (data.length === 1) {
+    const c = data.charCodeAt(0);
+    if (c >= 32) return data;
+  }
+  return kittyPrintable(data);
+}
+
 const GLYPH: Record<ToggleState, string> = {
   on: "●",
   "on-project": "⊙",
@@ -97,8 +251,11 @@ export function openSkillsPanel(
     notify: (msg, kind) => ctx.ui.notify(msg, kind),
   });
 
-  return ctx.ui.custom((_tui, theme, _keybindings, done) => {
+  return ctx.ui.custom((_tui, theme, keybindings, done) => {
     component.theme = theme;
+    // pi-tui KeybindingsManager (matches() → matchesKey, handles legacy +
+    // Kitty encodings); unit tests pass {} and the local mirror table is used.
+    component.keybindings = keybindings as SkillsPanel["keybindings"];
     component.done = done;
     return component;
   });
@@ -124,6 +281,14 @@ export interface SkillsPanel {
   filter: string;
   filterMode: boolean;
   theme: PanelTheme | null;
+  // KeybindingsManager from ctx.ui.custom (optional; unit tests may pass {}).
+  // Its .matches(data, bindingId) routes through pi-tui's matchesKey and is
+  // tried before the local legacy/CSI-u table (review finding #1).
+  keybindings?: { matches: (data: string, bindingId: string) => boolean } | null;
+  // state of every skill captured at panel open; change detection is a delta
+  // against this (not just the current state — a revert on-project → on must
+  // count as a change; review finding #3).
+  initialStates: ToggleState[];
   done?: (result: PanelResult) => void;
 }
 
@@ -136,10 +301,15 @@ export function createSkillsPanel(config: SkillsPanelConfig): SkillsPanel {
     filter: "",
     filterMode: false,
     theme: null,
+    keybindings: null,
+    initialStates: config.skills.map((s) => s.state),
     render: (width) => renderLines(panel, width),
     invalidate: () => {},
     handleInput: (data) => {
-      if (data === K.esc) {
+      // Both legacy and Kitty CSI-u encodings (see header comment): the
+      // keybindings manager (pi-tui matchesKey) first, local mirror fallback.
+      const key = resolveKey(data, panel.keybindings);
+      if (key === "esc") {
         if (panel.filter !== "") {
           panel.filter = "";
           panel.filterMode = false;
@@ -148,54 +318,55 @@ export function createSkillsPanel(config: SkillsPanelConfig): SkillsPanel {
         panel.done?.({ changed: false, saved: false });
         return;
       }
-      if (data === K.enter) {
+      if (key === "enter") {
         saveAndClose(panel);
         return;
       }
       if (panel.filterMode) {
-        if (data === K.backspace) {
+        if (key === "backspace") {
           panel.filter = panel.filter.slice(0, -1);
           panel.cursor = 0;
           return;
         }
-        // single printable char (including space) → append to filter;
-        // escape sequences (arrows etc.) fall through to cursor movement
-        if (data.length === 1 && data.charCodeAt(0) >= 32) {
-          panel.filter += data;
+        // printable char (incl. space, legacy or Kitty CSI-u) → append to
+        // filter; escape sequences (arrows etc.) fall through to cursor movement
+        const ch = printableChar(data);
+        if (ch !== undefined) {
+          panel.filter += ch;
           panel.cursor = 0;
           return;
         }
-      } else if (data === K.space) {
+      } else if (key === "space") {
         toggleCurrent(panel);
         return;
-      } else if (data === "/") {
+      } else if (printableChar(data) === "/") {
         panel.filterMode = true;
         panel.filter = "";
         panel.cursor = 0;
         return;
       }
-      if (data === K.backspace) return;
-      if (data === K.up) {
+      if (key === "backspace") return;
+      if (key === "up") {
         moveCursor(panel, -1);
         return;
       }
-      if (data === K.down) {
+      if (key === "down") {
         moveCursor(panel, 1);
         return;
       }
-      if (data === K.pageUp) {
+      if (key === "pageUp") {
         moveCursor(panel, -VIEWPORT);
         return;
       }
-      if (data === K.pageDown) {
+      if (key === "pageDown") {
         moveCursor(panel, VIEWPORT);
         return;
       }
-      if (data === K.home) {
+      if (key === "home") {
         panel.cursor = 0;
         return;
       }
-      if (data === K.end) {
+      if (key === "end") {
         panel.cursor = rows(panel).length - 1;
       }
     },
@@ -237,8 +408,11 @@ function toggleCurrent(panel: SkillsPanel): void {
   skill.state = next;
 }
 
+// Delta vs the state captured at panel open: catches on → off-project and the
+// on-project → on revert alike (the latter ends in plain "on", so a current-
+//state check would silently drop the user's revert).
 function isChanged(panel: SkillsPanel): boolean {
-  return panel.skills.some((s) => s.state === "off-project" || s.state === "on-project");
+  return panel.skills.some((s, i) => s.state !== panel.initialStates[i]);
 }
 
 function saveAndClose(panel: SkillsPanel): void {
@@ -248,6 +422,9 @@ function saveAndClose(panel: SkillsPanel): void {
   }
   let data: Record<string, unknown>;
   let skills: string[];
+  // Intentionally re-read the settings file at save time (the panel seeded
+  // states from it at open): if the file changed while the panel was open we
+  // apply overrides to the fresh content, not a stale snapshot.
   try {
     const parsed = parseSettings(readFileSync(panel.projectSettingsPath, "utf-8"));
     if (!parsed.ok) {
@@ -266,7 +443,22 @@ function saveAndClose(panel: SkillsPanel): void {
     skills = applyState(skill, skill.state, skills);
   }
   data.skills = skills;
-  saveSettingsSync(data, panel.projectSettingsPath);
+  try {
+    saveSettingsSync(data, panel.projectSettingsPath);
+  } catch (err) {
+    // Atomic save failed mid-way: remove the stale tmp file (same naming as
+    // core.ts saveSettingsSync), report, and close without claiming a save.
+    const tmpPath = settingsTmpPath(panel.projectSettingsPath);
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      /* nothing more we can do about the tmp file */
+    }
+    const reason = err instanceof Error ? err.message : String(err);
+    panel.notify(`保存 settings.json 失败：${reason}`, "error");
+    panel.done?.({ changed: false, saved: false });
+    return;
+  }
   panel.notify("已保存到 .pi/settings.json，运行 /reload 生效");
   panel.done?.({ changed: true, saved: true });
 }
