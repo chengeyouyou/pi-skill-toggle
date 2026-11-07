@@ -36,7 +36,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
 import type { SkillEntry } from "./core.ts";
-import { applyState, clearOverrides, parseSettings, planToggles, saveSettingsSync } from "./core.ts";
+import { applyState, clearOverrides, packageIdentity, parseSettings, planToggles, saveSettingsSync } from "./core.ts";
 import { openSkillsPanel } from "./ui.ts";
 
 let skillCache: SkillEntry[] = [];
@@ -317,11 +317,14 @@ function projectInstallRoot(source: string, projectDir: string): string | null {
 
 /**
  * Install roots to scan for package skills, per source string.
- * Project entries win over global ones by source identity (mirror pi
- * dedupePackages:1492): a source declared in BOTH the project and the global
- * settings is scanned ONLY under its project install root — scanning the
- * shadowed global root too could surface skills whose toggle writes to the
- * project entry while pi resolves them from the global root (toggle no-op).
+ * Project entries win over global ones by PI IDENTITY (packageIdentity,
+ * mirror pi dedupePackages:1492 / getPackageIdentity:1472): a package whose
+ * identity appears in BOTH the project and the global settings is scanned
+ * ONLY under its project install root (e.g. global `npm:foo@1.0.0` + project
+ * `npm:foo@2.0.0` → project root only). Scanning the shadowed global root
+ * too could surface skills whose toggle writes to the project entry while pi
+ * resolves them from the global root (toggle no-op). Different identities
+ * each get their own root.
  */
 export function packageScanRoots(
   projectSources: string[],
@@ -329,14 +332,14 @@ export function packageScanRoots(
   projectDir: string,
   homeDir: string,
 ): { installRoot: string; packageSource: string }[] {
-  const projectSet = new Set(projectSources);
+  const projectIdentities = new Set(projectSources.map(packageIdentity));
   const out: { installRoot: string; packageSource: string }[] = [];
   for (const source of projectSources) {
     const root = projectInstallRoot(source, projectDir);
     if (root) out.push({ installRoot: root, packageSource: source });
   }
   for (const source of globalSources) {
-    if (projectSet.has(source)) continue; // shadowed by the project entry
+    if (projectIdentities.has(packageIdentity(source))) continue; // shadowed
     const root = findPackageInstallRoot(source, projectDir, homeDir);
     if (root) out.push({ installRoot: root, packageSource: source });
   }

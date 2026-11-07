@@ -88,6 +88,107 @@ function normalizeExactPattern(pattern: string): string {
   return leadingSlash + out.join("/");
 }
 
+/**
+ * pi package IDENTITY for a settings `packages` source string — the key pi
+ * dedupes and matches by (NOT the raw source string), mirroring
+ * package-manager.js getPackageIdentity:1472:
+ *   npm → `npm:<name>` — version ignored (parseNpmSpec:1514 regex, scope
+ *         aware: `npm:@scope/pkg@1.2.3` → `npm:@scope/pkg`).
+ *   git → `git:<host>/<path>` — ref and .git suffix ignored (utils/git.js
+ *         parseGitUrl:150 + splitRef:2 + buildGitSource:89: SCP/URL/shorthand
+ *         forms, path leading slashes + `.git` stripped, path needs ≥2
+ *         segments, shorthand host must contain a dot or be localhost).
+ *   unknown/unparseable → the source string itself.
+ * Exported pure helper (unit-tested in test/skill-toggle/finalfix2.test.ts).
+ */
+export function packageIdentity(source: string): string {
+  if (source.startsWith("npm:")) {
+    // parseNpmSpec (package-manager.js:1514): same regex, scope-aware.
+    const spec = source.slice(4).trim();
+    const m = /^(@?[^@]+(?:\/[^@]+)?)(?:@.+)?$/.exec(spec);
+    return `npm:${m ? (m[1] ?? spec) : spec}`;
+  }
+  const git = gitIdentity(source);
+  return git ?? source;
+}
+
+/** splitRef (utils/git.js:2) mirror — strips an @ref off a git URL. */
+function splitGitRef(url: string): { repo: string; ref?: string } {
+  const scp = /^git@([^:]+):(.+)$/.exec(url);
+  if (scp) {
+    const pathWithRef = scp[2] ?? "";
+    const at = pathWithRef.indexOf("@");
+    if (at < 0) return { repo: url };
+    const path = pathWithRef.slice(0, at);
+    const ref = pathWithRef.slice(at + 1);
+    if (!path || !ref) return { repo: url };
+    return { repo: `git@${scp[1]}:${path}`, ref };
+  }
+  if (url.includes("://")) {
+    try {
+      const parsed = new URL(url);
+      const pathWithRef = parsed.pathname.replace(/^\/+/, "");
+      const at = pathWithRef.indexOf("@");
+      if (at < 0) return { repo: url };
+      const path = pathWithRef.slice(0, at);
+      const ref = pathWithRef.slice(at + 1);
+      if (!path || !ref) return { repo: url };
+      parsed.pathname = `/${path}`;
+      return { repo: parsed.toString().replace(/\/$/, ""), ref };
+    } catch {
+      return { repo: url };
+    }
+  }
+  const slash = url.indexOf("/");
+  if (slash < 0) return { repo: url };
+  const pathWithRef = url.slice(slash + 1);
+  const at = pathWithRef.indexOf("@");
+  if (at < 0) return { repo: url };
+  const path = pathWithRef.slice(0, at);
+  const ref = pathWithRef.slice(at + 1);
+  if (!path || !ref) return { repo: url };
+  return { repo: `${url.slice(0, slash)}/${path}`, ref };
+}
+
+/**
+ * `git:<host>/<path>` identity, null when the source is not a parseable git
+ * source. pi accepts the `git:` prefix OR explicit protocol URLs
+ * (parseGitUrl:165-169); the hosted-git-info first pass only adds subdomain
+ * handling, the generic fallback (parseGenericGitUrl:106) is what we mirror.
+ */
+function gitIdentity(source: string): string | null {
+  const trimmed = source.trim();
+  const url = trimmed.startsWith("git:") ? trimmed.slice(4).trim() : trimmed;
+  if (!trimmed.startsWith("git:") && !/^(https?|ssh|git):\/\//i.test(url)) return null;
+  const { repo } = splitGitRef(url);
+  let host = "";
+  let path = "";
+  const scp = /^git@([^:]+):(.+)$/.exec(repo);
+  if (scp) {
+    host = scp[1] ?? "";
+    path = scp[2] ?? "";
+  } else if (/^(https?|ssh|git):\/\//i.test(repo)) {
+    try {
+      const parsed = new URL(repo);
+      host = parsed.hostname;
+      path = parsed.pathname.replace(/^\/+/, "");
+    } catch {
+      return null;
+    }
+  } else {
+    const slash = repo.indexOf("/");
+    if (slash < 0) return null;
+    host = repo.slice(0, slash);
+    path = repo.slice(slash + 1);
+    if (!host.includes(".") && host !== "localhost") return null;
+  }
+  // buildGitSource (utils/git.js:89): strip .git suffix + leading slashes;
+  // needs host and a ≥2-segment path or the source is not a git source.
+  const normalized = path.replace(/\.git$/, "").replace(/^\/+/, "");
+  if (!host || !normalized || normalized.split("/").length < 2) return null;
+  return `git:${host}/${normalized}`;
+}
+
 function isPrefixed(entry: string): boolean {
   return entry.startsWith("+") || entry.startsWith("-") || entry.startsWith("!");
 }
@@ -141,13 +242,23 @@ function stateFromEntries(entries: unknown[], pattern: string): ToggleState {
   return state;
 }
 
-function packageObjectFor(
+/**
+ * Find the packages entry whose source has the SAME PI IDENTITY as `source`
+ * (packageIdentity, not exact string — review #2: pi dedupes/matches by
+ * identity, so `npm:foo@2.0.0` matches a skill known as `npm:foo@1.0.0`).
+ * Returns the object form (string entries wrapped) or null.
+ */
+export function packageObjectFor(
   packages: unknown[],
   source: string,
 ): Record<string, unknown> | null {
+  const identity = packageIdentity(source);
   const match = packages.find((p) => {
-    if (typeof p === "string") return p === source;
-    if (p && typeof p === "object") return (p as Record<string, unknown>).source === source;
+    if (typeof p === "string") return packageIdentity(p) === identity;
+    if (p && typeof p === "object") {
+      const pSource = (p as Record<string, unknown>).source;
+      return typeof pSource === "string" && packageIdentity(pSource) === identity;
+    }
     return false;
   });
   if (match === undefined) return null;
@@ -303,9 +414,16 @@ function applyPackage(
   const source = skill.packageSource;
   if (typeof source !== "string" || source === "") return;
   const pattern = skillPattern(skill, "package");
+  // Identity match (review #2): the settings entry may carry a different
+  // version/ref than the skill's known source — the entry's OWN source
+  // string is preserved (we clone it, never rewrite it).
+  const identity = packageIdentity(source);
   let pkgIndex = out.packages.findIndex((p) => {
-    if (typeof p === "string") return p === source;
-    if (p && typeof p === "object") return (p as Record<string, unknown>).source === source;
+    if (typeof p === "string") return packageIdentity(p) === identity;
+    if (p && typeof p === "object") {
+      const pSource = (p as Record<string, unknown>).source;
+      return typeof pSource === "string" && packageIdentity(pSource) === identity;
+    }
     return false;
   });
   if (pkgIndex === -1) {
