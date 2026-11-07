@@ -44,6 +44,7 @@ import {
   saveSettingsSync,
   settingsTmpPath,
   visibleSkills,
+  type SaveInput,
   type SkillEntry,
   type ToggleState,
 } from "./core.ts";
@@ -225,6 +226,7 @@ const SOURCE_TAG: Record<string, string> = {
   project: "[项目]",
   user: "[全局]",
   agents: "[agents]",
+  package: "[包]",
 };
 
 const VIEWPORT = 10;
@@ -242,11 +244,14 @@ export function openSkillsPanel(
   options: SkillsPanelOptions,
 ): Promise<PanelResult> {
   const component = createSkillsPanel({
-    skills: options.skills.map((s) => ({
-      ...s,
-      state: resolveState(s, readProjectSkills(options.projectSettingsPath)),
-      description: (s as { description?: string }).description ?? "",
-    })),
+    skills: options.skills.map((s) => {
+      const { skills: sk, packages: pk } = readProjectSettings(options.projectSettingsPath);
+      return {
+        ...s,
+        state: resolveState(s, sk, pk),
+        description: (s as { description?: string }).description ?? "",
+      };
+    }),
     projectSettingsPath: options.projectSettingsPath,
     notify: (msg, kind) => ctx.ui.notify(msg, kind),
   });
@@ -396,7 +401,7 @@ function toggleCurrent(panel: SkillsPanel): void {
   const skill = list[clampCursor(panel.cursor, list.length)];
   if (!skill) return;
   if (skill.state === "read-only") {
-    panel.notify("该 skill 来自包或自定义路径，v1 不支持切换", "warning");
+    panel.notify("该 skill 无法通过 settings 切换", "warning");
     return;
   }
   if (skill.disableModelInvocation) {
@@ -421,7 +426,7 @@ function saveAndClose(panel: SkillsPanel): void {
     return;
   }
   let data: Record<string, unknown>;
-  let skills: string[];
+  let saveInput: SaveInput;
   // Intentionally re-read the settings file at save time (the panel seeded
   // states from it at open): if the file changed while the panel was open we
   // apply overrides to the fresh content, not a stale snapshot.
@@ -433,16 +438,17 @@ function saveAndClose(panel: SkillsPanel): void {
       return;
     }
     data = parsed.data;
-    skills = parsed.skills;
+    saveInput = { skills: parsed.skills, packages: parsed.packages };
   } catch {
     data = {};
-    skills = [];
+    saveInput = { skills: [], packages: [] };
   }
   for (const skill of panel.skills) {
     if (skill.state === "read-only") continue;
-    skills = applyState(skill, skill.state, skills);
+    saveInput = applyState(skill, skill.state, saveInput);
   }
-  data.skills = skills;
+  data.skills = saveInput.skills;
+  data.packages = saveInput.packages;
   try {
     saveSettingsSync(data, panel.projectSettingsPath);
   } catch (err) {
@@ -517,11 +523,12 @@ function renderLines(panel: SkillsPanel, width: number): string[] {
   return lines;
 }
 
-function readProjectSkills(path: string): string[] {
+function readProjectSettings(path: string): { skills: string[]; packages: unknown[] } {
   try {
     const parsed = parseSettings(readFileSync(path, "utf-8"));
-    return parsed.ok ? parsed.skills : [];
+    if (parsed.ok) return { skills: parsed.skills, packages: parsed.packages };
   } catch {
-    return [];
+    // fall through
   }
+  return { skills: [], packages: [] };
 }

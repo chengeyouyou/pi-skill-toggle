@@ -14,7 +14,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 
 import { openSkillsPanel, type SkillsPanel } from "../../.pi/extensions/skill-toggle/ui.ts";
 import type { SkillEntry } from "../../.pi/extensions/skill-toggle/core.ts";
@@ -41,22 +41,32 @@ const theme = {
 };
 
 // --- skills fixture ------------------------------------------------------------
+// Windows-shaped fixture paths: production runs on Windows and core.ts writes
+// NATIVE-separator patterns (mirroring pi config), so expected patterns below
+// are computed with join()/relative() to match the production host.
+const W = (...parts: string[]) => join(...parts);
+const BRAIN_ABS = W("C:", "u", ".pi", "skills", "brainstorming", "SKILL.md");
+const BRAIN_BASE = W("C:", "u", ".pi");
+const LOCAL_ABS = W("C:", "proj", ".pi", "skills", "my-local-skill", "SKILL.md");
+const LOCAL_BASE = W("C:", "proj", ".pi");
+const LOCAL_REL = relative(LOCAL_BASE, LOCAL_ABS); // written project pattern
+const NO_AUTO_ABS = W("C:", "u", ".pi", "skills", "no-auto", "SKILL.md");
 
 function skill(overrides: Partial<SkillEntry> = {}): SkillEntry {
   return {
     name: "brainstorming",
-    filePath: "/home/u/.pi/skills/brainstorming/SKILL.md",
-    baseDir: "/home/u/.pi",
+    filePath: BRAIN_ABS,
+    baseDir: BRAIN_BASE,
     source: "user",
     ...overrides,
   };
 }
 
 const SKILLS: (SkillEntry & { description?: string })[] = [
-  { name: "brainstorming", filePath: "/home/u/.pi/skills/brainstorming/SKILL.md", baseDir: "/home/u/.pi", source: "user", description: "创造性工作前必须使用" },
-  { name: "my-local-skill", filePath: "/proj/.pi/skills/my-local-skill/SKILL.md", baseDir: "/proj/.pi", source: "project", description: "项目本地技能" },
-  { name: "pkg-skill", filePath: "/proj/.pi/node_modules/x/skills/pkg-skill/SKILL.md", baseDir: "/proj/.pi", source: "other", description: "来自包" },
-  { name: "no-auto", filePath: "/home/u/.pi/skills/no-auto/SKILL.md", baseDir: "/home/u/.pi", source: "user", description: "禁用自动调用", disableModelInvocation: true },
+  { name: "brainstorming", filePath: BRAIN_ABS, baseDir: BRAIN_BASE, source: "user", kind: "user", description: "创造性工作前必须使用" },
+  { name: "my-local-skill", filePath: LOCAL_ABS, baseDir: LOCAL_BASE, source: "project", kind: "project", description: "项目本地技能" },
+  { name: "pkg-skill", filePath: W("C:", "proj", ".pi", "node_modules", "x", "skills", "pkg-skill", "SKILL.md"), baseDir: LOCAL_BASE, source: "other", kind: "other", description: "来自包" },
+  { name: "no-auto", filePath: NO_AUTO_ABS, baseDir: BRAIN_BASE, source: "user", kind: "user", description: "禁用自动调用", disableModelInvocation: true },
 ];
 
 // --- panel harness ---------------------------------------------------------------
@@ -136,8 +146,9 @@ test("render: header, legend, glyphs per state, source tags, read-only header, �
   const h = openPanel(SKILLS, {
     packages: ["p"],
     skills: [
-      "+skills/my-local-skill",
-      "-skills/brainstorming",
+      `+${LOCAL_REL}`,
+      BRAIN_ABS,
+      "-" + BRAIN_ABS,
     ],
   } as never);
   const out = h.panel.render(80).join("\n");
@@ -159,7 +170,7 @@ test("render: header, legend, glyphs per state, source tags, read-only header, �
 });
 
 test("render: uses theme tokens (no hardcoded ANSI)", () => {
-  const h = openPanel(SKILLS, { packages: ["p"], skills: ["-skills/brainstorming"] });
+  const h = openPanel(SKILLS, { packages: ["p"], skills: [BRAIN_ABS, "-" + BRAIN_ABS] });
   const out = h.panel.render(80).join("\n");
   assert.ok(out.includes("**"), "theme.bold not used");
   assert.ok(out.includes("[[muted]]"), "theme.fg(muted) not used");
@@ -176,7 +187,21 @@ test("space: advances state per nextState (on → off-project → on)", () => {
   const brain = out.split("\n").find((l) => l.includes("brainstorming"))!;
   assert.ok(brain.includes("○"), "glyph not updated after toggle");
   h.panel.handleInput(K.space);
+  assert.equal(h.panel.skills[0].state, "on-project");
+  h.panel.handleInput(K.space);
   assert.equal(h.panel.skills[0].state, "on");
+});
+
+test("space: full cycle on → off-project → on-project → on (Task 3.5)", () => {
+  const h = openPanel(SKILLS);
+  assert.equal(h.panel.skills[1].state, "on"); // my-local-skill
+  h.panel.handleInput(K.down);
+  h.panel.handleInput(K.space); // on → off-project
+  assert.equal(h.panel.skills[1].state, "off-project");
+  h.panel.handleInput(K.space); // off-project → on-project
+  assert.equal(h.panel.skills[1].state, "on-project");
+  h.panel.handleInput(K.space); // on-project → on
+  assert.equal(h.panel.skills[1].state, "on");
 });
 
 test("space: disableModelInvocation row rejected with notify, state unchanged", () => {
@@ -204,8 +229,12 @@ test("Enter: saves changed skills to projectSettingsPath, packages preserved, su
   const saved = readSettings(h.settingsPath);
   assert.deepEqual(saved.packages, ["earendil-works/superpowers"], "packages key must survive");
   const skills = saved.skills as string[];
-  assert.ok(skills.includes("-skills/brainstorming"), `expected -skills/brainstorming, got ${skills}`);
-  assert.ok(skills.includes("-skills/my-local-skill"), `expected -skills/my-local-skill, got ${skills}`);
+  // Task 3.5: user-kind skills persist as a PAIR [abs, -abs] (plain first)
+  assert.ok(skills.includes(BRAIN_ABS), `expected plain abs pair entry, got ${skills}`);
+  assert.ok(skills.includes(`-${BRAIN_ABS}`), `expected -abs pair entry, got ${skills}`);
+  const absIdx = skills.indexOf(BRAIN_ABS);
+  assert.ok(absIdx >= 0 && skills[absIdx + 1] === `-${BRAIN_ABS}`, "plain entry must precede -abs");
+  assert.ok(skills.includes(`-${LOCAL_REL}`), `expected -${LOCAL_REL}, got ${skills}`);
   assert.ok(skills.includes("-other-entry"), "unrelated entries must survive");
   assert.ok(!skills.some((e) => e.includes("pkg-skill")), "read-only skill must not be written");
   assert.ok(
@@ -242,7 +271,7 @@ test("read-only row: space warns, no state change, Enter writes nothing for it",
   h.panel.handleInput(K.space);
   assert.equal(h.panel.skills[2].state, "read-only");
   assert.ok(
-    h.notifyLog.some(([m, k]) => m === "该 skill 来自包或自定义路径，v1 不支持切换" && k === "warning"),
+    h.notifyLog.some(([m, k]) => m === "该 skill 无法通过 settings 切换" && k === "warning"),
     `warning missing: ${JSON.stringify(h.notifyLog)}`,
   );
   h.panel.handleInput(K.enter);
@@ -299,7 +328,11 @@ test("kitty CSI-u: Enter arrives as ESC[13u (and flag-2 ESC[13;1u) and saves (re
   h2.panel.handleInput(" "); // one toggle
   h2.panel.handleInput("\x1b[13u"); // second plain form
   assert.deepEqual(await expectClosed(h2.promise, 'kitty CSI-u Enter "\x1b[13u"'), { changed: true, saved: true });
-  assert.ok((readSettings(h2.settingsPath).skills as string[]).includes("-skills/brainstorming"));
+  const savedSkills = readSettings(h2.settingsPath).skills as string[];
+  assert.ok(
+    savedSkills.includes("-" + BRAIN_ABS),
+    `expected user pair -abs entry, got ${savedSkills}`,
+  );
   // with-modifier form \x1b[13;1u (mod 1-indexed) and event-type form
   // \x1b[13;1:1u must also resolve to Enter
   const h3 = openPanel(SKILLS, { packages: ["p"], skills: [] });
@@ -386,7 +419,7 @@ test("Enter: state delta from panel open is detected — on → off-project save
   // detection must be a delta vs the state captured at panel open.
   const h = openPanel(SKILLS, {
     packages: ["p"],
-    skills: ["+skills/my-local-skill"],
+    skills: [`+${LOCAL_REL}`],
   });
   assert.equal(h.panel.skills[0].state, "on"); // brainstorming: no override
   h.panel.handleInput(" "); // brainstorming on → off-project
@@ -395,21 +428,24 @@ test("Enter: state delta from panel open is detected — on → off-project save
   assert.deepEqual(await h.promise, { changed: true, saved: true });
   const saved = readSettings(h.settingsPath);
   const skills = saved.skills as string[];
-  assert.ok(skills.includes("-skills/brainstorming"), `expected -skills/brainstorming, got ${skills}`);
-  assert.ok(skills.includes("+skills/my-local-skill"), "untouched override entries survive");
+  // Task 3.5: user-kind brainstorming → pair [abs, -abs]
+  assert.ok(skills.includes(BRAIN_ABS), `expected abs pair entry, got ${skills}`);
+  assert.ok(skills.includes(`-${BRAIN_ABS}`), `expected -abs pair entry, got ${skills}`);
+  assert.ok(skills.includes(`+${LOCAL_REL}`), "untouched override entries survive");
   // Round trip: reopening the panel and toggling brainstorming back to on must
   // also be a detected delta (initial state off-project → current on).
   const h2 = openPanel(SKILLS, {
     packages: ["p"],
-    skills: ["-skills/brainstorming", "+skills/my-local-skill"],
+    skills: [BRAIN_ABS, "-" + BRAIN_ABS, `+${LOCAL_REL}`],
   });
   assert.equal(h2.panel.skills[0].state, "off-project");
-  h2.panel.handleInput(" "); // off-project → on
+  h2.panel.handleInput(" "); // off-project → on-project
+  h2.panel.handleInput(" "); // on-project → on (removes the user pair entries)
   assert.equal(h2.panel.skills[0].state, "on");
   h2.panel.handleInput("\r");
   assert.deepEqual(await h2.promise, { changed: true, saved: true });
   const saved2 = readSettings(h2.settingsPath);
-  assert.deepEqual(saved2.skills, ["+skills/my-local-skill"], "- entry removed after revert to on");
+  assert.deepEqual(saved2.skills, [`+${LOCAL_REL}`], "user pair entries removed after revert to on");
 });
 
 test("Enter: reverting a ⊙ on-project skill to ● on is detected (initial state on-project → on) and the + entry is removed (review finding #3)", async () => {
@@ -418,22 +454,94 @@ test("Enter: reverting a ⊙ on-project skill to ● on is detected (initial sta
   // and the user's revert was silently dropped ({changed:false, saved:false}).
   const h = openPanel(SKILLS, {
     packages: ["p"],
-    skills: ["+skills/my-local-skill"],
+    skills: [`+${LOCAL_REL}`],
   });
   assert.equal(h.panel.skills[1].state, "on-project");
   h.panel.handleInput("\x1b[B"); // down → my-local-skill
-  // nextState is a 3-state cycle (on-project → off-project → on), so reverting
-  // a ⊙ skill back to plain ● on takes two toggles; the second one ends in
-  // "on", which the OLD current-state isChanged() did NOT detect.
-  h.panel.handleInput(" "); // on-project → off-project
-  h.panel.handleInput(" "); // off-project → on (removes the + entry)
+  // Task 3.5 cycle: on-project → on in a SINGLE toggle (previously two presses
+  // were needed: on-project → off-project → on).
+  h.panel.handleInput(" "); // on-project → on (removes the + entry)
   assert.equal(h.panel.skills[1].state, "on");
   h.panel.handleInput("\r");
   assert.deepEqual(await h.promise, { changed: true, saved: true });
   const saved = readSettings(h.settingsPath);
   const skills = saved.skills as string[];
-  assert.ok(!skills.includes("+skills/my-local-skill"), `+ entry must be removed, got ${skills}`);
+  assert.ok(!skills.includes(`+${LOCAL_REL}`), `+ entry must be removed, got ${skills}`);
   assert.equal(skills.length, 0, "only the + entry was ever present");
+});
+
+test("Enter: package-kind skill toggles via packages object (Task 3.5)", async () => {
+  const pkgBaseDir = W("C:", "u", ".pi", "agent", "git", "github.com", "obra", "superpowers");
+  const pkgRel = relative(pkgBaseDir, W(pkgBaseDir, "skills", "brainstorming", "SKILL.md"));
+  const pkgSkill: SkillEntry & { description?: string } = {
+    name: "brainstorming-pkg",
+    filePath: W(pkgBaseDir, "skills", "brainstorming", "SKILL.md"),
+    baseDir: pkgBaseDir,
+    source: "package",
+    kind: "package",
+    packageSource: "git:github.com/obra/superpowers",
+    pkgBaseDir,
+    description: "包内技能",
+  };
+  const h = openPanel([pkgSkill], {
+    packages: ["git:github.com/obra/superpowers", "npm:other"],
+    skills: [],
+  });
+  assert.equal(h.panel.skills[0].state, "on"); // plain string entry → inherit
+  h.panel.handleInput(" "); // on → off-project
+  h.panel.handleInput("\r");
+  assert.deepEqual(await h.promise, { changed: true, saved: true });
+  const saved = readSettings(h.settingsPath);
+  assert.deepEqual(saved.packages, [
+    { source: "git:github.com/obra/superpowers", skills: [`-${pkgRel}`] },
+    "npm:other",
+  ]);
+  assert.deepEqual(saved.skills, []);
+});
+
+test("Enter: reverting a package skill back to inherit restores the plain string entry (Task 3.5)", async () => {
+  const pkgBaseDir = W("C:", "u", ".pi", "agent", "git", "github.com", "obra", "superpowers");
+  const pkgRel = relative(pkgBaseDir, W(pkgBaseDir, "skills", "brainstorming", "SKILL.md"));
+  const pkgSkill: SkillEntry & { description?: string } = {
+    name: "brainstorming-pkg",
+    filePath: W(pkgBaseDir, "skills", "brainstorming", "SKILL.md"),
+    baseDir: pkgBaseDir,
+    source: "package",
+    kind: "package",
+    packageSource: "git:github.com/obra/superpowers",
+    pkgBaseDir,
+    description: "包内技能",
+  };
+  const h = openPanel([pkgSkill], {
+    packages: [{ source: "git:github.com/obra/superpowers", skills: [`-${pkgRel}`] }],
+    skills: [],
+  });
+  assert.equal(h.panel.skills[0].state, "off-project");
+  h.panel.handleInput(" "); // off-project → on-project
+  h.panel.handleInput(" "); // on-project → on (inherit)
+  h.panel.handleInput("\r");
+  assert.deepEqual(await h.promise, { changed: true, saved: true });
+  const saved = readSettings(h.settingsPath);
+  assert.deepEqual(saved.packages, ["git:github.com/obra/superpowers"], "object must revert to plain string");
+});
+
+test("render: package-kind row shows [包] tag (Task 3.5)", () => {
+  const pkgBaseDir = W("C:", "u", ".pi", "agent", "git", "github.com", "obra", "superpowers");
+  const pkgSkill: SkillEntry & { description?: string } = {
+    name: "brainstorming-pkg",
+    filePath: W(pkgBaseDir, "skills", "brainstorming", "SKILL.md"),
+    baseDir: pkgBaseDir,
+    source: "package",
+    kind: "package",
+    packageSource: "git:github.com/obra/superpowers",
+    pkgBaseDir,
+    description: "包内技能",
+  };
+  const h = openPanel([pkgSkill]);
+  const line = h.panel.render(80).find((l) => l.includes("brainstorming-pkg"))!;
+  assert.ok(line.includes("[包]"), `package tag missing: ${line}`);
+  assert.ok(line.includes("●"), "inherit glyph expected");
+  void h.promise;
 });
 
 test("cursor: up/down/home/end/pageUp/pageDown clamp within visible rows", () => {

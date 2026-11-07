@@ -1,292 +1,291 @@
-// Unit tests for .pi/extensions/skill-toggle/core.ts (Task 1).
-// Run: node --experimental-strip-types --test test/skill-toggle/core.test.ts
+// Unit tests for .pi/extensions/skill-toggle/core.ts (Task 3.5 API).
+// Run: node --experimental-strip-types --test "test/skill-toggle/*.test.ts"
 //
-// Pattern semantics (verified against pi 1.5.0 package-manager.js + real loader,
-// see core.ts header): `+`/`-` entries match by PATH (skill dir or SKILL.md file,
-// relative to baseDir or absolute), exact match, NOT the skill name. Canonical
-// pattern written by patternFor() = relative skill DIR, posix separators.
+// Task 3.5 three-way rules (pi 1.5.0 config-selector.js + verified runtime,
+// see core.ts header and task35.test.ts for the full rule coverage):
+//   project kind: single ±rel in settings.skills (rel to baseDir).
+//   user kind: pair [abs, ±abs] in settings.skills.
+//   package kind: settings.packages {source, skills: ["±rel"]} object entries.
+//   readback: last matching entry wins.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { join, relative } from "node:path";
+
 
 import {
   parseSettings,
-  overrideFor,
   resolveState,
   nextState,
   applyState,
-  patternFor,
   visibleSkills,
   pageSlice,
   type SkillEntry,
 } from "../../.pi/extensions/skill-toggle/core.ts";
 
-// --- helpers ---------------------------------------------------------------
+// --- fixtures ----------------------------------------------------------------
+// Written/read-back patterns use NATIVE separators (core.ts skillPattern,
+// mirroring pi config). Fixtures + expected patterns are computed with the
+// win32 path API so tests are host-independent and match the production host
+// (Windows). Read-back matching itself is separator-insensitive.
+const toPosix = (p: string) => p.split("\\").join("/");
+const winJoin = (...parts: string[]) => join(...parts);
+const winRel = (base: string, p: string) => relative(base, p);
+const PROJ_ROOT = winJoin("C:", "proj");
+const PROJ_PI = winJoin(PROJ_ROOT, ".pi");
+const USER_BASE = winJoin("C:", "u", ".agents");
+const USER_SKILL_FILE = winJoin(USER_BASE, "skills", "anysearch", "SKILL.md");
+const USER_ABS = USER_SKILL_FILE;
+const PROJ_SKILL_FILE = winJoin(PROJ_PI, "skills", "probe-x", "SKILL.md");
+const PROJ_REL = winRel(PROJ_PI, PROJ_SKILL_FILE);
+const PKG_SOURCE = "git:github.com/obra/superpowers";
+const PKG_ROOT = winJoin("C:", "u", ".pi", "agent", "git", "github.com", "obra", "superpowers");
+const PKG_SKILL_FILE = winJoin(PKG_ROOT, "skills", "brainstorming", "SKILL.md");
+const PKG_REL = winRel(PKG_ROOT, PKG_SKILL_FILE);
 
 function skill(overrides: Partial<SkillEntry> = {}): SkillEntry {
   return {
     name: "foo",
-    filePath: "/proj/.pi/skills/foo/SKILL.md",
-    baseDir: "/proj/.pi",
+    filePath: winJoin(PROJ_PI, "skills", "foo", "SKILL.md"),
+    baseDir: PROJ_PI,
     source: "project",
+    kind: "project",
     ...overrides,
   };
 }
 
-const foo = skill(); // pattern: skills/foo (relative to baseDir)
-
-// --- patternFor ------------------------------------------------------------
-
-test("patternFor: relative skill dir from baseDir (posix), no leading ./", () => {
-  assert.equal(patternFor(foo), "skills/foo");
+const project = skill();
+const probeX = skill({
+  name: "probe-x",
+  filePath: PROJ_SKILL_FILE,
 });
-
-test("patternFor: nested skill keeps nested relative dir", () => {
-  const nested = skill({
-    name: "deep",
-    filePath: "/proj/.pi/skills/group/deep/SKILL.md",
-  });
-  assert.equal(patternFor(nested), "skills/group/deep");
+const user = skill({
+  name: "anysearch",
+  filePath: USER_SKILL_FILE,
+  baseDir: USER_BASE,
+  source: "agents",
+  kind: "user",
 });
-
-test("patternFor: user-scope skill under ~/.pi", () => {
-  const user = skill({
-    name: "foo",
-    filePath: "/home/u/.pi/skills/foo/SKILL.md",
-    baseDir: "/home/u/.pi",
-    source: "user",
-  });
-  assert.equal(patternFor(user), "skills/foo");
+const pkg = skill({
+  name: "brainstorming",
+  filePath: PKG_SKILL_FILE,
+  baseDir: PKG_ROOT,
+  source: "package",
+  kind: "package",
+  packageSource: PKG_SOURCE,
+  pkgBaseDir: PKG_ROOT,
 });
+const other = skill({ source: "other", kind: "other" });
 
-test("patternFor: windows separators become posix", () => {
-  const win = skill({
-    name: "foo",
-    filePath: "C:\\proj\\.pi\\skills\\foo\\SKILL.md",
-    baseDir: "C:\\proj\\.pi",
-    source: "project",
-  });
-  assert.equal(patternFor(win), "skills/foo");
-});
+// --- parseSettings -------------------------------------------------------------
 
-// --- parseSettings ---------------------------------------------------------
-
-test("parseSettings: valid JSON with packages key, skills defaults to []", () => {
-  const r = parseSettings('{"packages": ["a/b"]}\n');
+test("parseSettings: valid JSON, skills present, packages absent → packages []", () => {
+  const r = parseSettings('{"skills": ["a"]}');
   assert.equal(r.ok, true);
   if (r.ok) {
-    assert.deepEqual(r.data, { packages: ["a/b"] });
-    assert.deepEqual(r.skills, []);
+    assert.deepEqual(r.skills, ["a"]);
+    assert.deepEqual(r.packages, []);
+    assert.deepEqual(r.data, { skills: ["a"] });
   }
 });
 
-test("parseSettings: bad json → ok:false, error is a string, NO data property", () => {
+test("parseSettings: packages null → []; non-array → ok:false; mixed entries pass through", () => {
+  const r = parseSettings('{"packages": null}');
+  assert.equal(r.ok, true);
+  if (r.ok) assert.deepEqual(r.packages, []);
+  const bad = parseSettings('{"packages": "npm:x"}');
+  assert.equal(bad.ok, false);
+  const mixed = parseSettings('{"packages": ["git:a/b", {"source": "npm:x", "skills": ["-s/y/SKILL.md"]}], "theme": "dark"}');
+  assert.equal(mixed.ok, true);
+  if (mixed.ok) {
+    assert.deepEqual(mixed.packages, ["git:a/b", { source: "npm:x", skills: ["-s/y/SKILL.md"] }]);
+    assert.equal(mixed.data.theme, "dark");
+  }
+});
+
+test("parseSettings: bad json → ok:false, error string, no data", () => {
   const r = parseSettings("{ bad json");
   assert.equal(r.ok, false);
-  if (!r.ok) {
-    assert.equal(typeof r.error, "string");
-    assert.ok(r.error.length > 0);
-  }
+  if (!r.ok) assert.ok(r.error.length > 0);
   assert.ok(!("data" in r));
 });
 
-test("parseSettings: skills entry not a string → ok:false", () => {
-  const r = parseSettings('{"skills": [1, "x"]}');
-  assert.equal(r.ok, false);
-  assert.ok(!("data" in r));
-});
-
-test("parseSettings: top-level JSON not an object → ok:false", () => {
-  const r = parseSettings('[1, 2]');
-  assert.equal(r.ok, false);
-});
-
-test("parseSettings: null skills is treated as []", () => {
+test("parseSettings: skills entry not a string → ok:false; top-level array → ok:false; null skills → []", () => {
+  assert.equal(parseSettings('{"skills": [1]}').ok, false);
+  assert.equal(parseSettings('[1]').ok, false);
   const r = parseSettings('{"skills": null}');
   assert.equal(r.ok, true);
   if (r.ok) assert.deepEqual(r.skills, []);
 });
 
-test("round-trip: packages, unrelated keys and untouched skills entries preserved in order", () => {
-  const raw = '{"packages": ["p/x"], "theme": "dark", "skills": ["+a", "-b", "./other/proj"]}';
-  const parsed = parseSettings(raw);
-  assert.equal(parsed.ok, true);
-  if (!parsed.ok) throw new Error("unreachable");
-  const target = applyState(foo, "off-project", parsed.skills);
-  // re-dump like saveSettingsSync and re-parse
-  const dumped = JSON.stringify(parsed.data, null, 2) + "\n";
-  const reparsed = parseSettings(dumped);
-  assert.equal(reparsed.ok, true);
-  if (!reparsed.ok) throw new Error("unreachable");
-  assert.deepEqual(reparsed.data.packages, ["p/x"]);
-  assert.equal(reparsed.data.theme, "dark");
-  assert.deepEqual(reparsed.skills, ["+a", "-b", "./other/proj"]);
-  assert.deepEqual(target, ["+a", "-b", "./other/proj", "-skills/foo"]);
+// --- resolveState ---------------------------------------------------------------
+
+test("resolveState: other kind → read-only regardless of entries", () => {
+  assert.equal(resolveState(other, ["-skills/foo/SKILL.md"], []), "read-only");
 });
 
-// --- overrideFor -----------------------------------------------------------
-
-test("overrideFor: [\"+skills/foo\", \"-skills/foo\"] → \"disable\" (- wins over +, pi: force-exclude applied after force-include)", () => {
-  assert.equal(overrideFor(foo, ["+skills/foo", "-skills/foo"]), "disable");
+test("resolveState: project kind — last entry wins; no entry → on", () => {
+  assert.equal(resolveState(probeX, [], []), "on");
+  assert.equal(resolveState(probeX, [`-${PROJ_REL}`], []), "off-project");
+  assert.equal(resolveState(probeX, [`+${PROJ_REL}`], []), "on-project");
+  assert.equal(resolveState(probeX, [`+${PROJ_REL}`, `-${PROJ_REL}`], []), "off-project");
+  assert.equal(resolveState(probeX, [`-${PROJ_REL}`, `+${PROJ_REL}`], []), "on-project");
+  // non-matching entries ignored
+  assert.equal(resolveState(probeX, [`-skills/bar/SKILL.md`], []), "on");
+  // posix form also matches (readback normalization)
+  assert.equal(resolveState(probeX, [`-skills/probe-x/SKILL.md`], []), "off-project");
 });
 
-test("overrideFor: [\"-skills/foo\", \"+skills/foo\"] → \"disable\" too (order-independent, matches real loader)", () => {
-  assert.equal(overrideFor(foo, ["-skills/foo", "+skills/foo"]), "disable");
+test("resolveState: user kind — pair forms; plain abs counts as match", () => {
+  assert.equal(resolveState(user, [], []), "on");
+  assert.equal(resolveState(user, [USER_ABS, `-${USER_ABS}`], []), "off-project");
+  assert.equal(resolveState(user, [USER_ABS, `+${USER_ABS}`], []), "on-project");
+  assert.equal(resolveState(user, [`-${USER_ABS}`], []), "off-project"); // single -abs also reads back
+  assert.equal(resolveState(user, [`+${USER_ABS}`], []), "on-project");
 });
 
-test("overrideFor: [\"-skills/foo\"] → \"disable\"", () => {
-  assert.equal(overrideFor(foo, ["-skills/foo"]), "disable");
+test("resolveState: package kind — string entry → on; object entries last-wins", () => {
+  assert.equal(resolveState(pkg, [], []), "on");
+  assert.equal(resolveState(pkg, [], [PKG_SOURCE]), "on");
+  assert.equal(resolveState(pkg, [], [{ source: PKG_SOURCE, skills: [`-${PKG_REL}`] }]), "off-project");
+  assert.equal(resolveState(pkg, [], [{ source: PKG_SOURCE, skills: [`+${PKG_REL}`] }]), "on-project");
+  assert.equal(
+    resolveState(pkg, [], [{ source: PKG_SOURCE, skills: [`+${PKG_REL}`, `-${PKG_REL}`] }]),
+    "off-project",
+  );
+  // object of another source is ignored
+  assert.equal(resolveState(pkg, [], [{ source: "npm:x", skills: ["-y"] }]), "on");
+  // object without skills key → inherit
+  assert.equal(resolveState(pkg, [], [{ source: PKG_SOURCE, autoload: false }]), "on");
 });
 
-test("overrideFor: plain entry (no prefix) → null (addition, not override)", () => {
-  assert.equal(overrideFor(foo, ["skills/foo", "./extra"]), null);
+// --- nextState --------------------------------------------------------------------
+
+test("nextState: on → off-project → on-project → on; read-only/off → null", () => {
+  assert.equal(nextState(project, "on"), "off-project");
+  assert.equal(nextState(project, "off-project"), "on-project");
+  assert.equal(nextState(project, "on-project"), "on");
+  assert.equal(nextState(project, "read-only"), null);
+  assert.equal(nextState(project, "off"), null);
 });
 
-test("overrideFor: no entries → null", () => {
-  assert.equal(overrideFor(foo, []), null);
+// --- applyState ---------------------------------------------------------------------
+
+const input = (skills: string[] = [], packages: unknown[] = []) => ({ skills, packages });
+
+test("applyState: project off → appends single -rel; on → removes it", () => {
+  const r1 = applyState(probeX, "off-project", input(["-unrelated"]));
+  assert.deepEqual(r1.skills, ["-unrelated", `-${PROJ_REL}`]);
+  const r2 = applyState(probeX, "on", input(r1.skills));
+  assert.deepEqual(r2.skills, ["-unrelated"]);
 });
 
-test("overrideFor: non-matching pattern → null", () => {
-  assert.equal(overrideFor(foo, ["-skills/bar"]), null);
+test("applyState: project on-project swaps -rel to +rel without duplicates", () => {
+  const r = applyState(probeX, "on-project", input([`-${PROJ_REL}`]));
+  assert.deepEqual(r.skills, [`+${PROJ_REL}`]);
 });
 
-test("overrideFor: SKILL.md relative file form also matches (loader accepts the file path too)", () => {
-  assert.equal(overrideFor(foo, ["-skills/foo/SKILL.md"]), "disable");
+test("applyState: user off → exactly [abs, -abs] (plain first); dirty -abs normalized to pair", () => {
+  const r = applyState(user, "off-project", input());
+  assert.deepEqual(r.skills, [USER_ABS, `-${USER_ABS}`]);
+  const dirty = applyState(user, "off-project", input([`-${USER_ABS}`]));
+  assert.deepEqual(dirty.skills, [USER_ABS, `-${USER_ABS}`]);
 });
 
-test("overrideFor: absolute path form also matches (pi accepts absolute too)", () => {
-  assert.equal(overrideFor(foo, ["-" + foo.filePath.split(/[/\\]/).join("/")]), "disable");
+test("applyState: user on-project → [abs, +abs]; on → removes plain/+/- forms", () => {
+  const r1 = applyState(user, "on-project", input([USER_ABS, `-${USER_ABS}`]));
+  assert.deepEqual(r1.skills, [USER_ABS, `+${USER_ABS}`]);
+  const r2 = applyState(user, "on", input([USER_ABS, `+${USER_ABS}`, `-${USER_ABS}`, "-x"]));
+  assert.deepEqual(r2.skills, ["-x"]);
 });
 
-test("overrideFor: leading ./ prefix in entry is normalized (pi strips ./)", () => {
-  assert.equal(overrideFor(foo, ["-./skills/foo"]), "disable");
-});
-
-// --- resolveState ----------------------------------------------------------
-
-test("resolveState: project source, no override → \"on\"", () => {
-  assert.equal(resolveState(foo, []), "on");
-});
-
-test("resolveState: [\"-pattern\"] → \"off-project\"", () => {
-  assert.equal(resolveState(foo, ["-skills/foo"]), "off-project");
-});
-
-test("resolveState: [\"+pattern\"] → \"on-project\"", () => {
-  assert.equal(resolveState(foo, ["+skills/foo"]), "on-project");
-});
-
-test("resolveState: user and agents sources are toggleable too", () => {
-  assert.equal(resolveState(skill({ source: "user" }), []), "on");
-  assert.equal(resolveState(skill({ source: "agents" }), ["-skills/foo"]), "off-project");
-});
-
-test("resolveState: source \"other\" → \"read-only\" (even with overrides)", () => {
-  assert.equal(resolveState(skill({ source: "other" }), ["-skills/foo"]), "read-only");
-});
-
-// --- nextState -------------------------------------------------------------
-
-test("nextState: on → off-project", () => {
-  assert.equal(nextState(foo, "on"), "off-project");
-});
-
-test("nextState: off-project → on", () => {
-  assert.equal(nextState(foo, "off-project"), "on");
-});
-
-test("nextState: on-project → off-project", () => {
-  assert.equal(nextState(foo, "on-project"), "off-project");
-});
-
-test("nextState: read-only → null", () => {
-  assert.equal(nextState(foo, "read-only"), null);
-});
-
-// --- applyState ------------------------------------------------------------
-
-test("applyState: from [\"+a\",\"-b\"] target off-project appends \"-skills/foo\"", () => {
-  assert.deepEqual(applyState(foo, "off-project", ["+a", "-b"]), ["+a", "-b", "-skills/foo"]);
-});
-
-test("applyState: back to \"on\" removes the -pattern, others untouched in order", () => {
-  assert.deepEqual(applyState(foo, "on", ["+a", "-b", "-skills/foo"]), ["+a", "-b"]);
-});
-
-test("applyState: swapping +foo to -foo replaces in place, no duplicate", () => {
-  assert.deepEqual(applyState(foo, "off-project", ["+skills/foo"]), ["-skills/foo"]);
-});
-
-test("applyState: target on-project appends the +pattern", () => {
-  assert.deepEqual(applyState(foo, "on-project", []), ["+skills/foo"]);
-});
-
-test("applyState: target on-project removes an existing -pattern", () => {
-  assert.deepEqual(applyState(foo, "on-project", ["-skills/foo", "-skills/bar"]), [
-    "-skills/bar",
-    "+skills/foo",
+test("applyState: package off appends object at end (string entries converted in place)", () => {
+  const r = applyState(pkg, "off-project", input([], ["npm:other", PKG_SOURCE]));
+  assert.deepEqual(r.packages, [
+    "npm:other",
+    { source: PKG_SOURCE, skills: [`-${PKG_REL}`] },
   ]);
 });
 
-test("applyState: read-only target removes matching entries, appends nothing (spec: remove, then append only when target requires)", () => {
-  assert.deepEqual(applyState(foo, "read-only", ["+a", "-skills/foo"]), ["+a"]);
+test("applyState: package on reverts object to string; autoload:false deletes; other keys keep object", () => {
+  const r1 = applyState(pkg, "on", input([], [{ source: PKG_SOURCE, skills: [`-${PKG_REL}`] }, "npm:other"]));
+  assert.deepEqual(r1.packages, [PKG_SOURCE, "npm:other"]);
+  const r2 = applyState(pkg, "on", input([], [{ source: PKG_SOURCE, skills: [`-${PKG_REL}`] }, { source: "npm:x", autoload: false }]));
+  assert.deepEqual(r2.packages, [PKG_SOURCE, { source: "npm:x", autoload: false }]);
+  const r3 = applyState(pkg, "on", input([], [{ source: PKG_SOURCE, skills: [`-${PKG_REL}`], prompts: ["p"] }]));
+  assert.deepEqual(r3.packages, [{ source: PKG_SOURCE, prompts: ["p"] }]);
 });
 
-// --- visibleSkills -----------------------------------------------------------
+test("applyState: package with no matching entry → on does nothing (no entry created)", () => {
+  const r = applyState(pkg, "on", input([], ["npm:other"]));
+  assert.deepEqual(r.packages, ["npm:other"]);
+});
+
+test("applyState: other kind / read-only → input unchanged (new arrays)", () => {
+  const skills = ["-a"];
+  const packages = ["p"];
+  const r = applyState(other, "off-project", { skills, packages });
+  assert.deepEqual(r.skills, ["-a"]);
+  assert.deepEqual(r.packages, ["p"]);
+  assert.notEqual(r.skills, skills);
+  assert.notEqual(r.packages, packages);
+});
+
+test("applyState: input arrays not mutated", () => {
+  const skills = [USER_ABS, `-${USER_ABS}`];
+  const packages = [{ source: PKG_SOURCE, skills: [`-${PKG_REL}`] }];
+  applyState(user, "on", { skills, packages });
+  assert.deepEqual(skills, [USER_ABS, `-${USER_ABS}`]);
+  assert.deepEqual(packages, [{ source: PKG_SOURCE, skills: [`-${PKG_REL}`] }]);
+});
+
+test("round-trip: parseSettings → applyState → re-parse preserves unrelated keys/entries", () => {
+  const raw = '{"theme": "dark", "skills": ["+a", "-b"], "packages": ["git:a/b"]}';
+  const parsed = parseSettings(raw);
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) throw new Error("unreachable");
+  let saveInput = { skills: parsed.skills, packages: parsed.packages };
+  saveInput = applyState(probeX, "off-project", saveInput);
+  saveInput = applyState(pkg, "on-project", saveInput);
+  assert.deepEqual(saveInput.skills, ["+a", "-b", `-${PROJ_REL}`]);
+  assert.deepEqual(saveInput.packages, ["git:a/b", { source: PKG_SOURCE, skills: [`+${PKG_REL}`] }]);
+  const dumped = JSON.stringify({ ...parsed.data, skills: saveInput.skills, packages: saveInput.packages }, null, 2) + "\n";
+  const reparsed = parseSettings(dumped);
+  assert.equal(reparsed.ok, true);
+  if (!reparsed.ok) throw new Error("unreachable");
+  assert.equal(reparsed.data.theme, "dark");
+  assert.deepEqual(reparsed.skills, saveInput.skills);
+  assert.deepEqual(reparsed.packages, saveInput.packages);
+});
+
+// --- visibleSkills / pageSlice (Task 2, unchanged) ---------------------------------
 
 function mk(name: string, description = ""): SkillEntry {
-  return { name, filePath: `/proj/.pi/skills/${name}/SKILL.md`, baseDir: "/proj/.pi", source: "project", ...(description ? { description } : {}) } as SkillEntry & { description?: string };
+  return {
+    name,
+    filePath: `C:\\proj\\.pi\\skills\\${name}\\SKILL.md`,
+    baseDir: "C:\\proj\\.pi",
+    source: "project",
+    kind: "project",
+    ...(description ? { description } : {}),
+  } as SkillEntry & { description?: string };
 }
 
-test("visibleSkills: empty filter returns all in original order", () => {
-  const list = [mk("a", "x"), mk("b", "y"), mk("c", "z")];
-  assert.deepEqual(visibleSkills(list, "").map((s) => s.name), ["a", "b", "c"]);
-  assert.deepEqual(visibleSkills(list, "  ").map((s) => s.name), ["a", "b", "c"]);
-});
-
-test("visibleSkills: filter \"foo\" matches name \"FooBar\" case-insensitively", () => {
-  const list = [mk("FooBar", ""), mk("baz", "")];
-  assert.deepEqual(visibleSkills(list, "foo").map((s) => s.name), ["FooBar"]);
-});
-
-test("visibleSkills: filter matches description via desc accessor", () => {
-  const list = [mk("has-foo-inside", "contains foo text"), mk("other", "")];
+test("visibleSkills: empty filter returns all in order; name + description matching", () => {
+  const list = [mk("a", "x"), mk("FooBar", ""), mk("baz")];
+  assert.deepEqual(visibleSkills(list, "").map((s) => s.name), ["a", "FooBar", "baz"]);
+  assert.deepEqual(visibleSkills(list, "FOO").map((s) => s.name), ["FooBar"]);
   assert.deepEqual(
-    visibleSkills(list, "foo", (s) => (s as { description?: string }).description ?? "").map((s) => s.name),
-    ["has-foo-inside"],
+    visibleSkills([mk("has-desc", "contains foo"), mk("name-foo")], "foo", (s) => (s.description ?? "")).map(
+      (s) => s.name,
+    ),
+    ["has-desc", "name-foo"],
   );
 });
 
-test("visibleSkills: filter matches name OR description, original order kept", () => {
-  const list = [mk("alpha", "has foo inside"), mk("foo-thing", ""), mk("none", "")];
-  assert.deepEqual(
-    visibleSkills(list, "foo", (s) => (s as { description?: string }).description ?? "").map((s) => s.name),
-    ["alpha", "foo-thing"],
-  );
-});
-
-// --- pageSlice ---------------------------------------------------------------
-
-test("pageSlice: cursor 0 returns first viewport items", () => {
-  const list = [1, 2, 3, 4, 5, 6];
-  assert.deepEqual(pageSlice(list, 0, 3), [1, 2, 3]);
-});
-
-test("pageSlice: cursor mid-list window contains cursor", () => {
-  const list = [1, 2, 3, 4, 5, 6, 7, 8];
-  const slice = pageSlice(list, 5, 5);
-  assert.deepEqual(slice, [4, 5, 6, 7, 8]);
-});
-
-test("pageSlice: cursor past end clamps to last page", () => {
-  const list = [1, 2, 3, 4, 5];
-  assert.deepEqual(pageSlice(list, 99, 3), [3, 4, 5]);
-});
-
-test("pageSlice: viewport larger than list returns whole list", () => {
-  const list = [1, 2, 3];
-  assert.deepEqual(pageSlice(list, 1, 10), [1, 2, 3]);
-});
-
-test("pageSlice: empty list returns empty", () => {
+test("pageSlice: windowing and clamping", () => {
+  assert.deepEqual(pageSlice([1, 2, 3, 4, 5, 6], 0, 3), [1, 2, 3]);
+  assert.deepEqual(pageSlice([1, 2, 3, 4, 5, 6, 7, 8], 5, 5), [4, 5, 6, 7, 8]);
+  assert.deepEqual(pageSlice([1, 2, 3, 4, 5], 99, 3), [3, 4, 5]);
+  assert.deepEqual(pageSlice([1, 2, 3], 1, 10), [1, 2, 3]);
   assert.deepEqual(pageSlice([], 0, 3), []);
 });
