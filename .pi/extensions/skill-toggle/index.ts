@@ -101,11 +101,17 @@ export function parseNpmName(source: string): string | null {
 /**
  * Classify where a skill lives (Task 3.5; supersedes classifySource):
  *   sourceInfo.origin === "package"            → {kind:"package", tag:"package"}
- *   baseDir under <project>/.pi or .agents     → {kind:"project", tag:project|agents}
+ *   baseDir under a git INSTALL ROOT matching the source string
+ *        (global or project scope)             → {kind:"package", tag:"package"}
+ *   baseDir under an npm INSTALL ROOT matching the source string
+ *        (global or project scope, review #1)  → {kind:"package", tag:"package"}
+ *   baseDir == <project>/.pi | .agents (or under it) → {kind:"project", ...}
+ *        — STRICT (review #3): an ANCESTOR .agents/.pi dir is "other" (pi loads
+ *        ancestor .agents/skills via collectAncestorAgentsSkillDirs, per-dir
+ *        baseDir — not writable from this project)
  *   baseDir under ~/.pi/agent or ~/.agents     → {kind:"user",    tag:user|agents}
- *   a git INSTALL ROOT whose dir matches a git source string
- *                                          → {kind:"package", tag:"package"} (scan-union entries)
- *   anything else (custom --skill paths, npm roots, …) → {kind:"other", tag:"other"}
+ *   anything else (custom --skill paths, foreign install roots, …)
+ *                                          → {kind:"other", tag:"other"}
  *
  * Boundary forms match "<prefix>/<sub>" exactly or as a real sub-path (a plain
  * startsWith would prefix-match "proj2" against "proj"). Case-insensitive
@@ -138,8 +144,46 @@ export function classifyKind(
       if (p === r || p.startsWith(`${r}/`)) return { kind: "package", tag: "package" };
     }
   }
-  if (under(proj, ".pi", p)) return { kind: "project", tag: "project" };
-  if (under(proj, ".agents", p)) return { kind: "project", tag: "agents" };
+  // npm INSTALL ROOT for this source string (package-manager.js
+  // getNpmInstallPath:1890) — two-root check mirroring the git branch above
+  // (review #1): global <agentDir>/npm/node_modules/<name> and project
+  // <project>/.pi/npm/node_modules/<name>. Both scopes are toggleable via a
+  // project settings.packages object entry, so both are kind "package".
+  const npmName = parseNpmName(source);
+  if (npmName) {
+    const roots = [
+      join(homeDir, ".pi", "agent", "npm", "node_modules", npmName),
+      join(projectDir, ".pi", "npm", "node_modules", npmName),
+    ];
+    for (const root of roots) {
+      const r = toLowerPosix(root);
+      if (p === r || p.startsWith(`${r}/`)) return { kind: "package", tag: "package" };
+    }
+    // An npm source whose baseDir is under an npm INSTALL ROOT PREFIX of a
+    // DIFFERENT package (global or project scope) → other (not project/.pi
+    // nor user/agentDir): pi never loads those dirs as project/user skills,
+    // so a ±rel settings pattern could never match (silent no-op) — same
+    // class as review #3. The global prefix was already "other" via the
+    // agentDir/npm rule below; the project prefix was previously "project".
+    const prefixes = [
+      toLowerPosix(join(homeDir, ".pi", "agent", "npm")),
+      toLowerPosix(join(projectDir, ".pi", "npm")),
+    ];
+    for (const pre of prefixes) {
+      if (p.startsWith(`${pre}/`)) return { kind: "other", tag: "other" };
+    }
+  }
+  // Project scope is STRICT (review #3): baseDir must equal <project>/.pi or
+  // <project>/.agents (or be a sub-path of it). pi attaches per-dir baseDirs
+  // to .agents skills from EVERY ancestor up to the git repo root
+  // (collectAncestorAgentsSkillDirs, package-manager.js:291) — an ancestor
+  // .agents baseDir would produce a pattern relative to the PROJECT baseDir
+  // that pi never matches (silent no-op), so it is read-only "other".
+  const projBase = proj.replace(/[/\\]+$/, "");
+  const projPi = `${projBase}/.pi`;
+  const projAgents = `${projBase}/.agents`;
+  if (p === projPi || p.startsWith(`${projPi}/`)) return { kind: "project", tag: "project" };
+  if (p === projAgents || p.startsWith(`${projAgents}/`)) return { kind: "project", tag: "agents" };
   // <agentDir>/git/... and <agentDir>/npm/... are package INSTALL roots, not
   // user skill dirs: a git root already matched above returned package; a
   // non-matching source / npm root → other (not "user").
@@ -153,17 +197,20 @@ export function classifyKind(
 }
 
 /**
- * Minimal SKILL.md frontmatter parser: name + description only (plain scalar
- * lines, surrounding single/double quotes tolerated). Returns null when there
- * is no frontmatter, it is unclosed, or description is missing/blank — pi
- * (dist/core/skills.js loadSkillFromFile) likewise refuses to load a skill
- * without a non-empty description, so we skip those too. Name fallback to the
- * parent directory name is the caller's job (pi: `frontmatterName ||
- * parentDirName`).
+ * Minimal SKILL.md frontmatter parser: name + description +
+ * disable-model-invocation (plain scalar lines, surrounding single/double
+ * quotes tolerated). The dmiv flag is present ONLY when the key is exactly
+ * the unquoted boolean `true` — pi (dist/core/skills.js:262) does
+ * `frontmatter["disable-model-invocation"] === true`, so quoted "true" or
+ * false does not count. Returns null when there is no frontmatter, it is
+ * unclosed, or description is missing/blank — pi (dist/core/skills.js
+ * loadSkillFromFile) likewise refuses to load a skill without a non-empty
+ * description, so we skip those too. Name fallback to the parent directory
+ * name is the caller's job (pi: `frontmatterName || parentDirName`).
  */
 export function parseSkillFrontmatter(
   raw: string,
-): { name?: string; description?: string } | null {
+): { name?: string; description?: string; disableModelInvocation?: boolean } | null {
   const lines = raw.split(/\r?\n/);
   if (lines[0]?.trim() !== "---") return null;
   let end = -1;
@@ -176,6 +223,7 @@ export function parseSkillFrontmatter(
   if (end === -1) return null;
   let name: string | undefined;
   let description: string | undefined;
+  let disableModelInvocation: boolean | undefined;
   for (const line of lines.slice(1, end)) {
     const m = /^([A-Za-z0-9_-]+):\s*(.*)$/.exec(line);
     if (!m) continue;
@@ -188,9 +236,18 @@ export function parseSkillFrontmatter(
     }
     if (m[1] === "name") name = v;
     else if (m[1] === "description") description = v;
+    // Review #5: scan paths need the flag too (the event list carries it,
+    // but disabled skills — exactly what the scan surfaces — are ABSENT
+    // from the event list). Only the unquoted boolean true counts (pi
+    // skills.js:262 strict `=== true` on the YAML value).
+    else if (m[1] === "disable-model-invocation" && m[2].trim() === "true") {
+      disableModelInvocation = true;
+    }
   }
   if (!description || description.trim() === "") return null;
-  return { name, description };
+  return disableModelInvocation
+    ? { name, description, disableModelInvocation: true }
+    : { name, description };
 }
 
 // --- settings readers (project settings are written by the panel; GLOBAL
@@ -213,22 +270,6 @@ function readPackagesFromSettingsPath(settingsPath: string): string[] {
   } catch {
     return [];
   }
-}
-
-/** Global + project packages, project entries first (project wins on dedupe). */
-export function collectPackageSources(projectDir: string, homeDir: string): string[] {
-  const agentDir = join(homeDir, ".pi", "agent");
-  const global = readPackagesFromSettingsPath(join(agentDir, "settings.json"));
-  const project = readPackagesFromSettingsPath(join(projectDir, ".pi", "settings.json"));
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const source of [...project, ...global]) {
-    if (!seen.has(source)) {
-      seen.add(source);
-      out.push(source);
-    }
-  }
-  return out;
 }
 
 // --- install-root derivation (mirror package-manager.js) -----------------------
@@ -351,6 +392,9 @@ function scanSkillDirs(dirs: ScanDir[]): SkillEntry[] {
         baseDir,
         source: tag,
         kind,
+        // Review #5: the event list carries dmiv, but disabled skills are
+        // exactly what the scan surfaces — read it from the frontmatter.
+        disableModelInvocation: fm.disableModelInvocation,
         description: fm.description,
       });
     }
@@ -399,6 +443,7 @@ export function scanPackageSkillDirs(
           kind: "package",
           packageSource,
           pkgBaseDir: installRoot,
+          disableModelInvocation: fm.disableModelInvocation,
           description: fm.description,
         });
       }
@@ -443,7 +488,15 @@ export function buildSkillCache(
     // Prefer sourceInfo.baseDir (pi's override baseDir); fall back to the
     // skill's own baseDir.
     const baseDir = sk.sourceInfo?.baseDir || sk.baseDir || dirname(sk.filePath);
-    const { kind, tag } = classifyKind(baseDir, "x", projectDir, home, sk.sourceInfo);
+    // Pass the real source string (review #1): classifyKind's git/npm
+    // install-root checks need it ("x" would defeat them).
+    const { kind, tag } = classifyKind(
+      baseDir,
+      sk.sourceInfo?.source ?? "x",
+      projectDir,
+      home,
+      sk.sourceInfo,
+    );
     add({
       // I1 (deferred from Task 3): skills without a frontmatter `name` fall
       // back to the parent directory name (pi: `frontmatterName ||

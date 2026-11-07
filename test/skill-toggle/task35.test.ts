@@ -160,9 +160,11 @@ test("classifyKind: git install root + matching git source → package (scan-uni
     classifyKind(PKG_ROOT, "git:example.com/x", PROJECT, HOME),
     { kind: "other", tag: "other" },
   );
-  // npm root is a user-scope install in this design — never a toggleable package kind
+  // npm root with a NON-matching source → other (review #1: a MATCHING npm
+  // source makes both global and project npm roots kind package — see
+  // finalfix.test.ts)
   assert.deepEqual<SkillKind>(
-    classifyKind(join(HOME, ".pi", "agent", "npm", "node_modules", "x"), "npm:x", PROJECT, HOME),
+    classifyKind(join(HOME, ".pi", "agent", "npm", "node_modules", "x"), "npm:y", PROJECT, HOME),
     { kind: "other", tag: "other" },
   );
 });

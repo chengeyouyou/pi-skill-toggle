@@ -136,9 +136,10 @@ test("classifyKind: git-shaped dir with a NON-matching source → other", () => 
     ).kind,
     "other",
   );
-  // npm roots are not toggleable package lanes
+  // npm INSTALL root with a NON-matching npm source → other (review #1: a
+  // MATCHING source makes it kind package — see finalfix.test.ts)
   assert.equal(
-    classifyKind("C:\\u\\.pi\\agent\\npm\\node_modules\\x", "npm:x", "C:\\proj", "C:\\u").kind,
+    classifyKind("C:\\u\\.pi\\agent\\npm\\node_modules\\x", "npm:y", "C:\\proj", "C:\\u").kind,
     "other",
   );
 });
