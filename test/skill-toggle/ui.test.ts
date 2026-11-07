@@ -262,6 +262,58 @@ test("Esc: resolves {changed:false, saved:false}, file unchanged even with pendi
   assert.equal(readFileSync(h.settingsPath, "utf-8"), before, "file must be unchanged");
 });
 
+test("Enter: unchanged row with hand-written plain relative entry survives verbatim (review finding #4)", async () => {
+  // A project skill row whose settings entry is a hand-written PLAIN relative
+  // path (valid pi force-include syntax; reads back as ⊙ on-project). The
+  // user does NOT touch this row and toggles a DIFFERENT skill; saving must
+  // keep the untouched entry exactly as found. The old save loop ran
+  // applyState over every panel skill, which silently deleted such entries.
+  const FOO_REL = "skills/foo/SKILL.md";
+  const fooSkill: SkillEntry & { description?: string } = {
+    name: "foo",
+    filePath: W(LOCAL_BASE, "skills", "foo", "SKILL.md"),
+    baseDir: LOCAL_BASE,
+    source: "project",
+    kind: "project",
+    description: "手写 plain 条目",
+  };
+  const h = openPanel([fooSkill, skill()], {
+    packages: ["p"],
+    skills: [FOO_REL],
+  });
+  assert.equal(h.panel.skills[0].state, "on-project"); // plain entry reads as forced on
+  assert.equal(h.panel.skills[1].state, "on");
+  h.panel.handleInput(K.down); // → brainstorming
+  h.panel.handleInput(" "); // on → off-project
+  h.panel.handleInput(K.enter);
+  assert.deepEqual(await h.promise, { changed: true, saved: true });
+  const skills = readSettings(h.settingsPath).skills as string[];
+  assert.ok(skills.includes(FOO_REL), `hand-written plain entry must survive verbatim, got ${skills}`);
+  assert.ok(
+    !skills.some((e) => e.includes("foo") && e !== FOO_REL),
+    `untouched entry must not be rewritten to ± form, got ${skills}`,
+  );
+  // the CHANGED skill's entry was written correctly (user pair, plain first)
+  assert.ok(skills.includes(BRAIN_ABS) && skills.includes(`-${BRAIN_ABS}`), `changed pair expected, got ${skills}`);
+});
+
+test("footer: 已更改 N 项 counts only rows whose state differs from panel open (review M8)", () => {
+  const h = openPanel(SKILLS);
+  let out = h.panel.render(80).join("\n");
+  assert.ok(out.includes("已更改 0 项"), `initial footer: ${out.split("\n").pop()}`);
+  assert.ok(!out.includes("已选"), "old 已选 label must be gone");
+  h.panel.handleInput(" "); // brainstorming on → off-project
+  out = h.panel.render(80).join("\n");
+  assert.ok(out.includes("已更改 1 项"), "one changed row");
+  h.panel.handleInput(" "); // off-project → on-project: still differs from initial
+  out = h.panel.render(80).join("\n");
+  assert.ok(out.includes("已更改 1 项"), "on-project still counts as changed");
+  h.panel.handleInput(" "); // on-project → on: back to initial state
+  out = h.panel.render(80).join("\n");
+  assert.ok(out.includes("已更改 0 项"), "revert to initial state must drop the count");
+  void h.promise;
+});
+
 test("read-only row: space warns, no state change, Enter writes nothing for it", async () => {
   const h = openPanel(SKILLS);
   // move to pkg-skill (index 2)
@@ -271,7 +323,9 @@ test("read-only row: space warns, no state change, Enter writes nothing for it",
   h.panel.handleInput(K.space);
   assert.equal(h.panel.skills[2].state, "read-only");
   assert.ok(
-    h.notifyLog.some(([m, k]) => m === "该 skill 无法通过 settings 切换" && k === "warning"),
+    h.notifyLog.some(
+      ([m, k]) => m === "该 skill 无法通过 settings 切换（来自外部路径或未声明来源）" && k === "warning",
+    ),
     `warning missing: ${JSON.stringify(h.notifyLog)}`,
   );
   h.panel.handleInput(K.enter);

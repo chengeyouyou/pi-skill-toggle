@@ -405,11 +405,11 @@ function toggleCurrent(panel: SkillsPanel): void {
   const skill = list[clampCursor(panel.cursor, list.length)];
   if (!skill) return;
   if (skill.state === "read-only") {
-    panel.notify("该 skill 无法通过 settings 切换", "warning");
+    panel.notify("该 skill 无法通过 settings 切换（来自外部路径或未声明来源）", "warning");
     return;
   }
   if (skill.disableModelInvocation) {
-    panel.notify("该 skill 已禁用自动调用，v1 不支持切换", "warning");
+    panel.notify("该 skill 已禁用自动调用，无法通过 settings 切换", "warning");
     return;
   }
   const next = nextState(skill, skill.state);
@@ -447,10 +447,15 @@ function saveAndClose(panel: SkillsPanel): void {
     data = {};
     saveInput = { skills: [], packages: [] };
   }
-  for (const skill of panel.skills) {
-    if (skill.state === "read-only") continue;
+  // Only transform CHANGED rows (review finding #4): an untouched row keeps
+  // its settings entries exactly as found — a hand-written plain relative
+  // force-include entry (valid pi syntax) would otherwise be silently deleted
+  // by applyState. isChanged()/save trigger use the same delta.
+  panel.skills.forEach((skill, i) => {
+    if (skill.state === "read-only") return;
+    if (skill.state === panel.initialStates[i]) return;
     saveInput = applyState(skill, skill.state, saveInput);
-  }
+  });
   data.skills = saveInput.skills;
   data.packages = saveInput.packages;
   try {
@@ -480,7 +485,10 @@ function renderLines(panel: SkillsPanel, width: number): string[] {
   const cursor = clampCursor(panel.cursor, list.length);
   const slice = pageSlice(list, cursor, VIEWPORT);
   const cursorInSlice = list.length === 0 ? -1 : slice.indexOf(list[cursor]);
-  const selected = panel.skills.filter((s) => s.state !== "off-project").length;
+  // Footer counts CHANGED rows (same delta as save), not "selected" (review M8).
+  const changed = panel.skills.filter(
+    (s, i) => s.state !== panel.initialStates[i],
+  ).length;
   const sep = "─".repeat(Math.min(width, 60));
 
   const lines: string[] = [];
@@ -516,7 +524,7 @@ function renderLines(panel: SkillsPanel, width: number): string[] {
   const pageCount = Math.max(1, Math.ceil(list.length / VIEWPORT));
   const curPage = Math.max(1, Math.floor(cursor / VIEWPORT) + 1);
   const footer =
-    `共 ${panel.skills.length} 个 skill，已选 ${selected} 个` +
+    `共 ${panel.skills.length} 个 skill，已更改 ${changed} 项` +
     (panel.filterMode
       ? `   输入过滤: ${panel.filter}▌`
       : panel.filter
