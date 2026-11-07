@@ -75,7 +75,7 @@ const SOURCE_TAG: Record<string, string> = {
 
 const VIEWPORT = 10;
 
-export function sourceTag(source: string): string {
+function sourceTag(source: string): string {
   return SOURCE_TAG[source] ?? "[自定义]";
 }
 
@@ -145,7 +145,7 @@ export function createSkillsPanel(config: SkillsPanelConfig): SkillsPanel {
           panel.filterMode = false;
           return;
         }
-        panel.done?.({ changed: isChanged(panel), saved: false });
+        panel.done?.({ changed: false, saved: false });
         return;
       }
       if (data === K.enter) {
@@ -311,13 +311,16 @@ function renderLines(panel: SkillsPanel, width: number): string[] {
   if (slice.length === 0) lines.push(t.fg("dim", " （没有匹配的 skill）"));
 
   lines.push(t.fg("muted", sep));
+  const pageCount = Math.max(1, Math.ceil(list.length / VIEWPORT));
+  const curPage = Math.max(1, Math.floor(cursor / VIEWPORT) + 1);
   const footer =
     `共 ${panel.skills.length} 个 skill，已选 ${selected} 个` +
     (panel.filterMode
       ? `   输入过滤: ${panel.filter}▌`
       : panel.filter
         ? `   过滤: ${panel.filter}（/ 继续编辑）`
-        : "");
+        : "") +
+    `   （页 ${curPage}/${pageCount}）`;
   lines.push(t.fg("muted", footer));
   return lines;
 }

@@ -131,6 +131,7 @@ test("render: header, legend, glyphs per state, source tags, read-only header, �
   const noauto = lines.find((l) => l.includes("no-auto"))!;
   assert.ok(noauto.includes("（禁用自动调用）"), `no-auto row: ${noauto}`);
   assert.ok(lines.some((l) => l.includes("共 4 个 skill")), "footer missing");
+  assert.ok(lines.some((l) => l.includes("（页 1/1）")), "page indicator missing");
 });
 
 test("render: uses theme tokens (no hardcoded ANSI)", () => {
@@ -198,16 +199,13 @@ test("Enter with no changes: resolves {changed:false, saved:false}, file untouch
   assert.equal(readFileSync(h.settingsPath, "utf-8"), before, "file must be unchanged");
 });
 
-test("Esc: resolves {saved:false}, file unchanged even with pending toggles", async () => {
+test("Esc: resolves {changed:false, saved:false}, file unchanged even with pending toggles", async () => {
   const h = openPanel(SKILLS);
   const before = readFileSync(h.settingsPath, "utf-8");
   h.panel.handleInput(K.space); // pending change, not saved
   h.panel.handleInput(K.esc);
   const result = await h.promise;
-  assert.equal(result.saved, false);
-  // brief pins the Esc result to changed:false; our panel instead reports
-  // whether pending (unsaved) toggles existed — both saved:false, no write.
-  assert.equal(result.changed, true);
+  assert.deepEqual(result, { changed: false, saved: false });
   assert.equal(readFileSync(h.settingsPath, "utf-8"), before, "file must be unchanged");
 });
 
