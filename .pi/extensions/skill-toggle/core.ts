@@ -163,11 +163,15 @@ function packageObjectFor(
  */
 const DELETE_PKG_ENTRY = Symbol("delete-package-entry");
 
+/** Shared resource-key presence check (applyState finalization + Task 4 reset). */
+function hasResourceKeys(pkg: Record<string, unknown>, except?: string): boolean {
+  return RESOURCE_TYPE_KEYS.some((key) => key !== except && pkg[key] !== undefined);
+}
+
 type PkgFinalization = string | typeof DELETE_PKG_ENTRY | null;
 
 function finalizePackageEntry(pkg: Record<string, unknown>): PkgFinalization {
-  const hasResource = RESOURCE_TYPE_KEYS.some((key) => pkg[key] !== undefined);
-  if (hasResource) return null; // keep the object
+  if (hasResourceKeys(pkg)) return null; // keep the object
   if (pkg.autoload === false) return DELETE_PKG_ENTRY; // pi splices it out
   const source = pkg.source;
   return typeof source === "string" ? source : DELETE_PKG_ENTRY;
@@ -328,11 +332,141 @@ function applyPackage(
   else delete pkg.skills;
   // pi: only when NO resource key is left defined does the entry get removed
   // (autoload===false) or reverted to the plain source string.
-  if (!RESOURCE_TYPE_KEYS.some((key) => pkg[key] !== undefined)) {
+  if (!hasResourceKeys(pkg)) {
     const finalized = finalizePackageEntry(pkg);
     if (finalized === DELETE_PKG_ENTRY) out.packages.splice(pkgIndex, 1);
     else if (typeof finalized === "string") out.packages[pkgIndex] = finalized;
   }
+}
+
+// --- subcommand planning (Task 4) ------------------------------------------------
+
+export interface TogglePlan {
+  // In argument order; target "off" maps to applyState("off-project"),
+  // target "on-project" stays as-is (ToggleState).
+  resolved: { skill: SkillEntry; target: "off" | "on-project" }[];
+  unknown: string[];
+  skipped: string[];
+  // Names matched >1 entry (first wins) — caller notifies.
+  duplicates: string[];
+}
+
+/**
+ * Plan for /skills:on / /skills:off (Task 4).
+ * - Case-insensitive EXACT name match; duplicate names take the FIRST match
+ *   (cache order: project, user, package, other) and are reported in
+ *   `duplicates` so the caller can notify.
+ * - `direction === "on"` → target "on-project" (force on);
+ *   `direction === "off"` → target "off" (caller maps to "off-project").
+ * - kind "other" or disableModelInvocation → `skipped` (never writable).
+ * - No match → `unknown` (caller notifies with the name list).
+ */
+export function planToggles(
+  skills: SkillEntry[],
+  names: string[],
+  direction: "on" | "off",
+): TogglePlan {
+  const resolved: TogglePlan["resolved"] = [];
+  const unknown: string[] = [];
+  const skipped: string[] = [];
+  const duplicates: string[] = [];
+  for (const name of names) {
+    const lower = name.toLowerCase();
+    const matches = skills.filter((s) => s.name.toLowerCase() === lower);
+    if (matches.length === 0) {
+      unknown.push(name);
+      continue;
+    }
+    const skill = matches[0];
+    if (matches.length > 1) duplicates.push(name);
+    const kind = kindOf(skill);
+    if (kind === "other" || skill.disableModelInvocation === true) {
+      skipped.push(name);
+      continue;
+    }
+    resolved.push({ skill, target: direction === "on" ? "on-project" : "off" });
+  }
+  return { resolved, unknown, skipped, duplicates };
+}
+
+// PAIRED-plain-removal rule (Task 4 reset, binding ruling): reset removes
+// every `±P` entry, and ALSO removes a plain `P` entry when P is an
+// ABSOLUTE path (drive letter, leading ~, or leading /). Reason: the
+// user-kind on-project state is written as the pair [abs, +abs]; deleting
+// only `+abs` would leave an orphan plain absolute entry, which pi treats as
+// force-load (isEnabledByOverrides includes-branch). Plain ABSOLUTE entries
+// are almost certainly plugin-written (pi config writes project-level
+// entries as relative paths; a hand-written absolute plain entry is a rare
+// misuse). Relative plain entries are ALWAYS preserved (legit hand-written
+// force-include). Entries starting with `!` are left untouched (the plugin
+// never writes them; only `±` forms are plugin-produced).
+function isAbsolutePattern(p: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(p) || p.startsWith("~") || p.startsWith("/");
+}
+
+/**
+ * Clear ALL skill overrides (Task 4 /skills:reset, v2 three-way).
+ * Pure: input objects/arrays are never mutated.
+ * - skills: remove every `+`/`-` entry; paired absolute plain entries are
+ *   co-removed (rule above). Relative plain entries survive.
+ * - packages: for each OBJECT entry with a `skills` key — drop the key, then
+ *   revert to the plain source string ONLY when nothing but `source` remains
+ *   (same resource-key check as applyState via RESOURCE_TYPE_KEYS). When an
+ *   explicit `autoload` key (true OR false) or another resource key
+ *   (extensions/prompts/themes) remains, the OBJECT is kept — reset must
+ *   not destroy the user's explicit package config (note: this differs
+ *   deliberately from applyState/finalizePackageEntry, where an
+ *   autoload-less entry reverts and autoload===false splices the entry;
+ *   reset is a pure override-clearing pass, not a write).
+ *   String entries are passed through untouched.
+ * - removed = number of removed skills-array entries (incl. co-removed
+ *   plain pairs) + number of removed `skills` keys.
+ */
+export function clearOverrides(input: {
+  skills: string[];
+  packages: unknown[];
+}): { skills: string[]; packages: unknown[]; removed: number } {
+  let removed = 0;
+  const removedTargets = new Set<string>();
+  for (const entry of input.skills) {
+    if (entry.startsWith("+") || entry.startsWith("-")) removedTargets.add(entry.slice(1));
+  }
+  const skills = input.skills.filter((entry) => {
+    if (entry.startsWith("+") || entry.startsWith("-")) {
+      removed++;
+      return false;
+    }
+    if (
+      !isPrefixed(entry) &&
+      removedTargets.has(entry) &&
+      isAbsolutePattern(entry)
+    ) {
+      removed++;
+      return false;
+    }
+    return true;
+  });
+  const packages: unknown[] = [];
+  for (const entry of input.packages) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      packages.push(entry);
+      continue;
+    }
+    const pkg = { ...(entry as Record<string, unknown>) };
+    if (pkg.skills === undefined) {
+      packages.push(entry); // no override to clear — keep the ORIGINAL object
+      continue;
+    }
+    delete pkg.skills;
+    removed++;
+    if (hasResourceKeys(pkg, "skills") || pkg.autoload !== undefined) {
+      packages.push(pkg); // explicit package config — keep the object
+    } else if (typeof pkg.source === "string") {
+      packages.push(pkg.source); // nothing but source left → plain string
+    }
+    // (no usable source → drop; unreachable for well-formed entries)
+  }
+  return { skills, packages, removed };
 }
 
 // --- panel display helpers (Task 2, unchanged) ---------------------------------

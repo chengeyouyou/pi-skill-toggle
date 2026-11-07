@@ -36,6 +36,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
 import type { SkillEntry } from "./core.ts";
+import { applyState, clearOverrides, parseSettings, planToggles, saveSettingsSync } from "./core.ts";
 import { openSkillsPanel } from "./ui.ts";
 
 let skillCache: SkillEntry[] = [];
@@ -541,18 +542,157 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
+  // --- Task 4 shared helpers ---------------------------------------------------
+
+  /**
+   * Empty-cache guard shared by all four commands. skillCache is
+   * module-level and filled ONCE per process; after /reload it is NOT
+   * cleared, so this guard only covers "new session has not yet triggered
+   * before_agent_start" — panel state always comes from the settings file
+   * (resolveState), so a panel reopened after /reload is correct regardless
+   * of the cache.
+   */
+  const requireSkills = (ctx: ExtensionCommandContext): SkillEntry[] | null => {
+    const skills = getSkillCache();
+    if (skills.length === 0) {
+      ctx.ui.notify("还没加载到 skill 列表，先发一条消息后再试", "warning");
+      return null;
+    }
+    return skills;
+  };
+
+  /**
+   * Read the project settings ONCE (missing file → empty object, pi treats
+   * missing settings as empty). Parse failure → error notify, returns null.
+   */
+  const readProjectSettingsOnce = (
+    ctx: ExtensionCommandContext,
+    projectSettingsPath: string,
+  ): Record<string, unknown> | null => {
+    let raw: string;
+    try {
+      raw = readFileSync(projectSettingsPath, "utf-8");
+    } catch {
+      return {}; // file missing → empty; saving creates the file
+    }
+    const parsed = parseSettings(raw);
+    if (!parsed.ok) {
+      ctx.ui.notify(`settings.json 解析失败：${parsed.error}`, "error");
+      return null;
+    }
+    return parsed.data;
+  };
+
+  /** Serial applyState loop → save → notify (on/off + reset 共用). */
+  const applyAndSave = (
+    ctx: ExtensionCommandContext,
+    projectSettingsPath: string,
+    data: Record<string, unknown>,
+    transforms: ((input: { skills: string[]; packages: unknown[] }) => { skills: string[]; packages: unknown[] })[],
+    successMsg: string,
+  ): void => {
+    let saveInput = { skills: (data.skills as string[]) ?? [], packages: (data.packages as unknown[]) ?? [] };
+    for (const transform of transforms) saveInput = transform(saveInput);
+    data.skills = saveInput.skills;
+    data.packages = saveInput.packages;
+    try {
+      saveSettingsSync(data, projectSettingsPath);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      ctx.ui.notify(`保存 settings.json 失败：${reason}（请检查 .pi/settings.json）`, "error");
+      return;
+    }
+    ctx.ui.notify(successMsg);
+  };
+
+  const runToggles = (direction: "on" | "off") => async (
+    args: string,
+    ctx: ExtensionCommandContext,
+  ) => {
+    const skills = requireSkills(ctx);
+    if (skills === null) return;
+    const names = args.split(/\s+/).filter((n) => n.length > 0);
+    if (names.length === 0) {
+      ctx.ui.notify(`用法：/skills:${direction} <skill 名> [更多...]`, "warning");
+      return;
+    }
+    const plan = planToggles(skills, names, direction);
+    if (plan.duplicates.length > 0) {
+      ctx.ui.notify(`重名取第一个：${plan.duplicates.join(", ")}`, "warning");
+    }
+    if (plan.skipped.length > 0) {
+      ctx.ui.notify(`无法切换：${plan.skipped.join(", ")}（来自包外路径或由包控制注入）`, "warning");
+    }
+    if (plan.unknown.length > 0) {
+      const list = skills.slice(0, 10).map((s) => s.name).join(", ");
+      ctx.ui.notify(`未找到 skill：${plan.unknown.join(", ")}（当前列表：${list}）`, "warning");
+    }
+    if (plan.resolved.length === 0) return;
+    const projectSettingsPath = join(ctx.cwd, ".pi", "settings.json");
+    const data = readProjectSettingsOnce(ctx, projectSettingsPath);
+    if (data === null) return;
+    const done = plan.resolved.map((r) => (r.target === "on-project" ? "✓ 开" : "✓ 关"));
+    const summary = plan.resolved
+      .map((r, i) => `${r.skill.name} ${done[i]}`)
+      .join(", ");
+    applyAndSave(
+      ctx,
+      projectSettingsPath,
+      data,
+      plan.resolved.map((r) => (input) =>
+        applyState(r.skill, r.target === "off" ? "off-project" : "on-project", input),
+      ),
+      `已更新：${summary}（运行 /reload 生效）`,
+    );
+  };
+
+  // --- commands ------------------------------------------------------------------
+
   pi.registerCommand("skills", {
     description: "会话内开关当前 session 加载的 skill（/skills）",
     async handler(_args: string, ctx: ExtensionCommandContext) {
-      const skills = getSkillCache();
-      if (skills.length === 0) {
-        ctx.ui.notify("还没加载到 skill 列表，先发一条消息后再试", "warning");
-        return;
-      }
+      const skills = requireSkills(ctx);
+      if (skills === null) return;
       const projectDir = ctx.cwd;
       const projectSettingsPath = join(projectDir, ".pi", "settings.json");
       // openSkillsPanel maps to PanelSkill[] (state from the settings file) itself.
       await openSkillsPanel(ctx, { skills, projectSettingsPath, projectDir });
+    },
+  });
+
+  pi.registerCommand("skills:on", {
+    description: "强制开启指定 skill（/skills:on <名称...>）",
+    async handler(args: string, ctx: ExtensionCommandContext) {
+      await runToggles("on")(args, ctx);
+    },
+  });
+
+  pi.registerCommand("skills:off", {
+    description: "关闭指定 skill（/skills:off <名称...>）",
+    async handler(args: string, ctx: ExtensionCommandContext) {
+      await runToggles("off")(args, ctx);
+    },
+  });
+
+  pi.registerCommand("skills:reset", {
+    description: "移除全部 skill 覆盖（/skills:reset）",
+    async handler(_args: string, ctx: ExtensionCommandContext) {
+      const skills = requireSkills(ctx);
+      if (skills === null) return;
+      const projectSettingsPath = join(ctx.cwd, ".pi", "settings.json");
+      const data = readProjectSettingsOnce(ctx, projectSettingsPath);
+      if (data === null) return;
+      const before = clearOverrides({
+        skills: (data.skills as string[]) ?? [],
+        packages: (data.packages as unknown[]) ?? [],
+      });
+      if (before.removed === 0) {
+        ctx.ui.notify("没有可移除的 skill 覆盖", "warning");
+        return;
+      }
+      data.skills = before.skills;
+      data.packages = before.packages;
+      applyAndSave(ctx, projectSettingsPath, data, [], "已移除全部 skill 覆盖（运行 /reload 恢复默认）");
     },
   });
 }
