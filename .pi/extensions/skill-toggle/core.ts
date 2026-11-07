@@ -34,6 +34,12 @@ export interface SkillEntry {
   baseDir: string;
   // "user" | "project" | "agents" | "other" — derived by the caller, core only consumes it.
   source: string;
+  // Task 3: filled from Skill.description / SKILL.md frontmatter. ui.ts already
+  // reads it defensively (`(s as { description?: string }).description`).
+  description?: string;
+  // Task 3: from Skill.disableModelInvocation (event list only; scan entries
+  // carry the frontmatter default of false semantics by omission).
+  disableModelInvocation?: boolean;
 }
 
 export type ToggleState =
