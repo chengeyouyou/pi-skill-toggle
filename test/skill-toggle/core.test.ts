@@ -228,3 +228,65 @@ test("applyState: target on-project removes an existing -pattern", () => {
 test("applyState: read-only target removes matching entries, appends nothing (spec: remove, then append only when target requires)", () => {
   assert.deepEqual(applyState(foo, "read-only", ["+a", "-skills/foo"]), ["+a"]);
 });
+
+// --- visibleSkills -----------------------------------------------------------
+
+import { visibleSkills, pageSlice } from "../../.pi/extensions/skill-toggle/core.ts";
+
+function mk(name: string, description = ""): SkillEntry {
+  return { name, filePath: `/proj/.pi/skills/${name}/SKILL.md`, baseDir: "/proj/.pi", source: "project", ...(description ? { description } : {}) } as SkillEntry & { description?: string };
+}
+
+test("visibleSkills: empty filter returns all in original order", () => {
+  const list = [mk("a", "x"), mk("b", "y"), mk("c", "z")];
+  assert.deepEqual(visibleSkills(list, "").map((s) => s.name), ["a", "b", "c"]);
+  assert.deepEqual(visibleSkills(list, "  ").map((s) => s.name), ["a", "b", "c"]);
+});
+
+test("visibleSkills: filter \"foo\" matches name \"FooBar\" case-insensitively", () => {
+  const list = [mk("FooBar", ""), mk("baz", "")];
+  assert.deepEqual(visibleSkills(list, "foo").map((s) => s.name), ["FooBar"]);
+});
+
+test("visibleSkills: filter matches description via desc accessor", () => {
+  const list = [mk("has-foo-inside", "contains foo text"), mk("other", "")];
+  assert.deepEqual(
+    visibleSkills(list, "foo", (s) => (s as { description?: string }).description ?? "").map((s) => s.name),
+    ["has-foo-inside"],
+  );
+});
+
+test("visibleSkills: filter matches name OR description, original order kept", () => {
+  const list = [mk("alpha", "has foo inside"), mk("foo-thing", ""), mk("none", "")];
+  assert.deepEqual(
+    visibleSkills(list, "foo", (s) => (s as { description?: string }).description ?? "").map((s) => s.name),
+    ["alpha", "foo-thing"],
+  );
+});
+
+// --- pageSlice ---------------------------------------------------------------
+
+test("pageSlice: cursor 0 returns first viewport items", () => {
+  const list = [1, 2, 3, 4, 5, 6];
+  assert.deepEqual(pageSlice(list, 0, 3), [1, 2, 3]);
+});
+
+test("pageSlice: cursor mid-list window contains cursor", () => {
+  const list = [1, 2, 3, 4, 5, 6, 7, 8];
+  const slice = pageSlice(list, 5, 5);
+  assert.deepEqual(slice, [4, 5, 6, 7, 8]);
+});
+
+test("pageSlice: cursor past end clamps to last page", () => {
+  const list = [1, 2, 3, 4, 5];
+  assert.deepEqual(pageSlice(list, 99, 3), [3, 4, 5]);
+});
+
+test("pageSlice: viewport larger than list returns whole list", () => {
+  const list = [1, 2, 3];
+  assert.deepEqual(pageSlice(list, 1, 10), [1, 2, 3]);
+});
+
+test("pageSlice: empty list returns empty", () => {
+  assert.deepEqual(pageSlice([], 0, 3), []);
+});

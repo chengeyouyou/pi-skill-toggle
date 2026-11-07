@@ -160,6 +160,37 @@ export function nextState(skill: SkillEntry, current: ToggleState): ToggleState 
   }
 }
 
+// --- panel display helpers (Task 2) ------------------------------------------
+
+/**
+ * Case-insensitive substring filter on skill name, plus an optional
+ * description accessor supplied by the caller. Empty/whitespace filter
+ * returns the input unchanged, in original order.
+ */
+export function visibleSkills(
+  all: SkillEntry[],
+  filter: string,
+  desc?: (s: SkillEntry) => string,
+): SkillEntry[] {
+  const needle = filter.trim().toLowerCase();
+  if (!needle) return all;
+  return all.filter((s) => {
+    if (s.name.toLowerCase().includes(needle)) return true;
+    if (desc) return (desc(s) ?? "").toLowerCase().includes(needle);
+    return false;
+  });
+}
+
+/**
+ * Stable window of at most `viewport` items containing `cursor`, clamped to
+ * list bounds (cursor < 0 → 0; past end → last page). Empty list → [].
+ */
+export function pageSlice<T>(list: T[], cursor: number, viewport: number): T[] {
+  if (list.length === 0 || viewport <= 0) return [];
+  const start = Math.max(0, Math.min(cursor - Math.floor(viewport / 2), list.length - viewport));
+  return list.slice(start, start + viewport);
+}
+
 export function applyState(
   skill: SkillEntry,
   target: ToggleState,
