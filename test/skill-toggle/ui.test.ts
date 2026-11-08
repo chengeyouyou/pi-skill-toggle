@@ -142,7 +142,7 @@ async function expectClosed(
   ]);
 }
 
-test("render: header, legends, two-column symbols, group headers, source tags, dmiv suffix", () => {
+test("render: header, legends, two-column symbols, group headers, source tags, dmiv annotation", () => {
   const h = openPanel(SKILLS, {
     packages: ["p"],
     skills: [
@@ -153,7 +153,7 @@ test("render: header, legends, two-column symbols, group headers, source tags, d
   } as never);
   const out = h.panel.render(80).join("\n");
   assert.ok(out.includes("Skills（空格切换 · / 搜索 · Enter 保存 · Esc 取消）"), "header missing");
-  assert.ok(out.includes("状态: + 启用   - 禁用   * 模型禁用(只读)"), "status legend missing");
+  assert.ok(out.includes("状态: + 启用   - 禁用   行尾（模型不自动调用）= 仅 /skill:name 手动可用"), "status legend missing");
   assert.ok(out.includes("作用域: 空格=继承默认   p=本项目强制"), "scope legend missing");
   // group order: project first → my-local-skill (+p on-project)
   const lines = h.panel.render(80);
@@ -167,7 +167,7 @@ test("render: header, legends, two-column symbols, group headers, source tags, d
   assert.ok(lines.some((l) => l.includes("用户级 skills (2)")), "user group header missing");
   assert.ok(lines.some((l) => l.includes("其他（只读） (1)")), "other group header missing");
   const noauto = lines.find((l) => l.includes("no-auto"))!;
-  assert.ok(noauto.includes("* ") && noauto.includes("（模型禁用，只读）"), `no-auto row: ${noauto}`);
+  assert.ok(noauto.includes("+ ") && noauto.includes("（模型不自动调用）"), `no-auto row: ${noauto}`);
   assert.ok(lines.some((l) => l.includes("共 4 个 skill")), "footer missing");
   assert.ok(lines.some((l) => l.includes("（页 1/1）")), "page indicator missing");
 });
@@ -222,14 +222,16 @@ test("space: full cycle on → off-project → on-project → on (Task 3.5)", ()
   assert.equal(h.panel.skills[1].state, "on");
 });
 
-test("space: disableModelInvocation row rejected with notify, state unchanged", () => {
+test("space: disableModelInvocation row IS toggleable (only annotation differs)", () => {
   const h = openPanel(SKILLS);
   h.panel.handleInput(K.down); // my-local-skill → brainstorming
   h.panel.handleInput(K.down); // → no-auto (dmiv, index 2)
-  const before = h.panel.skills[2].state;
-  h.panel.handleInput(K.space);
-  assert.equal(h.panel.skills[2].state, before, "state must not change");
-  assert.ok(h.notifyLog.some(([m]) => m.includes("禁用自动调用")), "no reject notify");
+  assert.equal(h.panel.skills[2].state, "on");
+  h.panel.handleInput(K.space); // on → off-project (dmiv no longer blocks)
+  assert.equal(h.panel.skills[2].state, "off-project");
+  const out = h.panel.render(80).join("\n");
+  const noauto = out.split("\n").find((l) => l.includes("no-auto"))!;
+  assert.ok(noauto.includes("-p ") && noauto.includes("（模型不自动调用）"), `no-auto row after toggle: ${noauto}`);
 });
 
 test("Enter: saves changed skills to projectSettingsPath, packages preserved, success notify", async () => {

@@ -216,12 +216,13 @@ function printableChar(data: string): string | undefined {
 }
 
 /**
- * Status symbol (column 1): `+` enabled, `-` disabled, `*` disabled for
- * model auto-invocation (dmiv, read-only). Scope (column 2): blank = inherit
- * default, `p` = project-forced (on-project / off-project).
+ * Status symbol (column 1): `+` enabled, `-` disabled. Scope (column 2):
+ * blank = inherit default, `p` = project-forced (on-project / off-project).
+ * disableModelInvocation is NOT a separate state — the skill is toggleable
+ * like any other (a `-` entry fully disables it, incl. /skill:name);
+ * the flag only annotates the row (（模型不自动调用）).
  */
 function statusSymbol(skill: PanelSkill): string {
-  if (skill.disableModelInvocation) return "*";
   switch (skill.state) {
     case "off-project":
       return "-";
@@ -272,7 +273,7 @@ function buildRows(panel: SkillsPanel, t: PanelTheme): RenderRow[] {
       const text = `  ${statusSymbol(skill)}${scopeMark(skill.state)} ${skill.name}  ${sourceTag(
         skill.source,
       )} — ${skill.description || "（无描述）"}${
-        skill.disableModelInvocation ? "（模型禁用，只读）" : ""
+        skill.disableModelInvocation ? "（模型不自动调用）" : ""
       }`;
       out.push({ type: "skill", skill, text });
     }
@@ -479,10 +480,6 @@ function toggleCurrent(panel: SkillsPanel): void {
     panel.notify("该 skill 无法通过 settings 切换（来自外部路径或未声明来源）", "warning");
     return;
   }
-  if (skill.disableModelInvocation) {
-    panel.notify("该 skill 已禁用自动调用，无法通过 settings 切换", "warning");
-    return;
-  }
   const next = nextState(skill, skill.state);
   if (next === null) return;
   skill.state = next;
@@ -565,7 +562,7 @@ function renderLines(panel: SkillsPanel, width: number): string[] {
 
   const lines: string[] = [];
   lines.push(t.bold(" Skills（空格切换 · / 搜索 · Enter 保存 · Esc 取消）"));
-  lines.push(t.fg("muted", " 状态: + 启用   - 禁用   * 模型禁用(只读)"));
+  lines.push(t.fg("muted", " 状态: + 启用   - 禁用   行尾（模型不自动调用）= 仅 /skill:name 手动可用"));
   lines.push(t.fg("muted", " 作用域: 空格=继承默认   p=本项目强制"));
   lines.push(t.fg("muted", sep));
 
@@ -583,7 +580,7 @@ function renderLines(panel: SkillsPanel, width: number): string[] {
     const isCursor = skill === skillsOnly[cursor]?.skill;
     const mark = isCursor ? ">" : " ";
     const text = row.text.replace(/^  /, ` ${mark}`);
-    if (skill.state === "read-only" || skill.disableModelInvocation) {
+    if (skill.state === "read-only") {
       lines.push(t.fg("dim", text));
     } else if (skill.state === "on") {
       lines.push(text);

@@ -107,10 +107,10 @@ test("planToggles: duplicate names take the first and are reported", () => {
   assert.deepEqual(plan.duplicates, ["dup"]);
 });
 
-test("planToggles: kind other / disableModelInvocation → skipped; unknown names → unknown", () => {
+test("planToggles: kind other → skipped (dmiv is toggleable); unknown names → unknown", () => {
   const plan = planToggles(ALL_SKILLS, ["pkg-external", "no-auto", "ghost"], "on");
-  assert.deepEqual(plan.resolved, []);
-  assert.deepEqual(plan.skipped, ["pkg-external", "no-auto"]);
+  assert.deepEqual(plan.resolved.map((r) => r.skill.name), ["no-auto"]);
+  assert.deepEqual(plan.skipped, ["pkg-external"]);
   assert.deepEqual(plan.unknown, ["ghost"]);
 });
 

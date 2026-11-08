@@ -476,7 +476,10 @@ export interface TogglePlan {
  *   `duplicates` so the caller can notify.
  * - `direction === "on"` → target "on-project" (force on);
  *   `direction === "off"` → target "off" (caller maps to "off-project").
- * - kind "other" or disableModelInvocation → `skipped` (never writable).
+ * - kind "other" → `skipped` (never writable). disableModelInvocation skills
+ *   ARE toggleable (a `-` entry fully disables them, including /skill:name
+ *   explicit invocation) — verified against pi source; the flag is only an
+ *   informational annotation.
  * - No match → `unknown` (caller notifies with the name list).
  */
 export function planToggles(
@@ -498,7 +501,7 @@ export function planToggles(
     const skill = matches[0];
     if (matches.length > 1) duplicates.push(name);
     const kind = kindOf(skill);
-    if (kind === "other" || skill.disableModelInvocation === true) {
+    if (kind === "other") {
       skipped.push(name);
       continue;
     }

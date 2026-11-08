@@ -725,7 +725,7 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify(`重名取第一个：${plan.duplicates.join(", ")}`, "warning");
     }
     if (plan.skipped.length > 0) {
-      ctx.ui.notify(`无法切换：${plan.skipped.join(", ")}（来自包外路径或由包控制注入）`, "warning");
+      ctx.ui.notify(`无法切换：${plan.skipped.join(", ")}（来自包外路径，无项目级覆盖可写）`, "warning");
     }
     if (plan.unknown.length > 0) {
       const list = skills.slice(0, 10).map((s) => s.name).join(", ");

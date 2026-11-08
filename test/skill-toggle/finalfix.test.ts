@@ -252,20 +252,20 @@ test("#5: scanPackageSkillDirs — dmiv frontmatter lands on the SkillEntry", ()
     assert.ok(dmiv, "dmiv skill present");
     assert.equal(dmiv!.disableModelInvocation, true);
     assert.equal(entries.find((e) => e.name === "plain-skill")!.disableModelInvocation, undefined);
-    // read-only path: planToggles skips a dmiv entry (panel Space rejection
-    // uses the same flag — ui.test.ts covers the UI side)
+    // dmiv skills are TOGGLEABLE (a `-` entry fully disables them, incl.
+    // /skill:name) — planToggles must NOT skip them (ui.test.ts covers the UI side)
     const plan = planToggles(entries, ["manual-only"], "off");
-    assert.deepEqual(plan.skipped, ["manual-only"]);
-    assert.equal(plan.resolved.length, 0);
+    assert.deepEqual(plan.skipped, []);
+    assert.equal(plan.resolved.length, 1);
     const planOn = planToggles(entries, ["manual-only", "plain-skill"], "on");
-    assert.deepEqual(planOn.skipped, ["manual-only"]);
-    assert.deepEqual(planOn.resolved.map((r) => r.skill.name), ["plain-skill"]);
+    assert.deepEqual(planOn.skipped, []);
+    assert.deepEqual(planOn.resolved.map((r) => r.skill.name), ["manual-only", "plain-skill"]);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
 });
 
-test("#5: planToggles — event-list dmiv flag also skipped (existing guard intact)", () => {
+test("#5: planToggles — event-list dmiv flag is toggleable (annotation only)", () => {
   const dmiv: SkillEntry = {
     name: "no-auto",
     filePath: "C:\\u\\.pi\\agent\\skills\\no-auto\\SKILL.md",
@@ -282,6 +282,6 @@ test("#5: planToggles — event-list dmiv flag also skipped (existing guard inta
     kind: "user",
   };
   const plan = planToggles([dmiv, ok], ["no-auto", "toggleable"], "off");
-  assert.deepEqual(plan.skipped, ["no-auto"]);
-  assert.deepEqual(plan.resolved.map((r) => r.skill.name), ["toggleable"]);
+  assert.deepEqual(plan.skipped, []);
+  assert.deepEqual(plan.resolved.map((r) => r.skill.name), ["no-auto", "toggleable"]);
 });
