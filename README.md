@@ -5,14 +5,14 @@ Pi 扩展：**在项目内通过 `/skills` 面板按项目开关 skill**。开�
 ## 安装
 
 ```bash
-# 本地路径（开发）
-pi install ./path/to/pi-wechat
+# git 仓库
+pi install git:github.com/chengeyouyou/pi-skill-toggle
 
-# git 仓库（发布后）
-pi install git:github.com/<you>/pi-wechat
+# 本地路径（开发）
+pi install /path/to/pi-skill-toggle
 
 # 项目级安装（写入 .pi/settings.json，需项目受信任后加载）
-pi install -l ./path/to/pi-wechat
+pi install -l git:github.com/chengeyouyou/pi-skill-toggle
 ```
 
 `pi remove <source>` 卸载。安装后 `/reload` 或重启会话生效。

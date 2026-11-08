@@ -150,7 +150,7 @@ test("clearOverrides: packages — drop skills key, revert to string, keep objec
   const out = clearOverrides({
     skills: [],
     packages: [
-      "npm:pi-wechat-assistant", // plain string → untouched
+      "npm:other-assistant", // plain string → untouched
       { source: PKG_SOURCE, skills: [`-${PKG_REL}`] }, // no other keys → revert to string
       { source: "npm:other", autoload: false, skills: ["-x"] }, // explicit autoload → object kept
       { source: "npm:third", skills: ["+x"], extensions: ["e"] }, // other resource key → object kept
@@ -158,7 +158,7 @@ test("clearOverrides: packages — drop skills key, revert to string, keep objec
     ],
   });
   assert.deepEqual(out.packages, [
-    "npm:pi-wechat-assistant",
+    "npm:other-assistant",
     PKG_SOURCE,
     { source: "npm:other", autoload: false },
     { source: "npm:third", extensions: ["e"] },
@@ -265,7 +265,7 @@ test("wiring: /skills:reset → all three override lanes cleared, plain string p
   const { handlers } = loadExtension();
   const h = ctxWithDir({
     packages: [
-      "npm:pi-wechat-assistant",
+      "npm:other-assistant",
       { source: PKG_SOURCE, skills: [`-${PKG_REL}`] },
     ],
     skills: [USER_ABS, `-${USER_ABS}`, `+${PROJ_REL}`],
@@ -275,7 +275,7 @@ test("wiring: /skills:reset → all three override lanes cleared, plain string p
   const saved = readJson(h.settingsPath);
   assert.deepEqual(saved.skills, [], "± entries + paired plain removed");
   assert.deepEqual(saved.packages, [
-    "npm:pi-wechat-assistant",
+    "npm:other-assistant",
     PKG_SOURCE, // object reverted to plain string
   ]);
   assert.equal(
@@ -287,7 +287,7 @@ test("wiring: /skills:reset → all three override lanes cleared, plain string p
 
 test("wiring: /skills:reset with nothing to clear → warning, file untouched", async () => {
   const { handlers } = loadExtension();
-  const h = ctxWithDir({ packages: ["npm:pi-wechat-assistant"], skills: [] });
+  const h = ctxWithDir({ packages: ["npm:other-assistant"], skills: [] });
   const before = readFileSync(h.settingsPath, "utf-8");
   setSkillCache(ALL_SKILLS);
   await handlers["skills:reset"]("", h.ctx);
