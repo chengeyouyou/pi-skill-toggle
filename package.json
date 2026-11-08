@@ -1,0 +1,18 @@
+{
+  "name": "pi-skill-toggle",
+  "version": "1.0.0",
+  "description": "Pi extension: in-session per-project skill toggles (/skills panel) — enable or disable any loaded skill per project via .pi/settings.json, project-isolated like `pi config -l`",
+  "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "MIT",
+  "pi": {
+    "extensions": [
+      "./.pi/extensions/skill-toggle/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
