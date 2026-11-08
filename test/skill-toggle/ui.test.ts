@@ -142,7 +142,7 @@ async function expectClosed(
   ]);
 }
 
-test("render: header, legend, glyphs per state, source tags, read-only header, 禁用自动调用 suffix", () => {
+test("render: header, legends, two-column symbols, group headers, source tags, dmiv suffix", () => {
   const h = openPanel(SKILLS, {
     packages: ["p"],
     skills: [
@@ -153,20 +153,34 @@ test("render: header, legend, glyphs per state, source tags, read-only header, �
   } as never);
   const out = h.panel.render(80).join("\n");
   assert.ok(out.includes("Skills（空格切换 · / 搜索 · Enter 保存 · Esc 取消）"), "header missing");
-  assert.ok(out.includes("状态图例: ● 默认加载   ⊙ 已覆盖(+)   ○ 已覆盖(-)   ‧ 只读"), "legend missing");
-  // ● on / ○ off-project / ⊙ on-project / ‧ read-only glyphs on the right rows
+  assert.ok(out.includes("状态: + 启用   - 禁用   * 模型禁用(只读)"), "status legend missing");
+  assert.ok(out.includes("作用域: 空格=继承默认   p=本项目强制"), "scope legend missing");
+  // group order: project first → my-local-skill (+p on-project)
   const lines = h.panel.render(80);
-  const brain = lines.find((l) => l.includes("brainstorming"))!;
-  assert.ok(brain.includes("○") && brain.includes("[全局]"), `brainstorming row: ${brain}`);
   const local = lines.find((l) => l.includes("my-local-skill"))!;
-  assert.ok(local.includes("⊙") && local.includes("[项目]"), `local row: ${local}`);
+  assert.ok(local.includes("+p ") && local.includes("[项目]"), `local row: ${local}`);
+  const brain = lines.find((l) => l.includes("brainstorming"))!;
+  assert.ok(brain.includes("-p ") && brain.includes("[全局]"), `brainstorming row: ${brain}`);
   const ro = lines.find((l) => l.includes("pkg-skill"))!;
-  assert.ok(ro.includes("‧"), `read-only row: ${ro}`);
-  assert.ok(lines.some((l) => l.includes("只读：")), "read-only section header missing");
+  assert.ok(ro.includes("+ ") && ro.includes("[自定义]"), `read-only row: ${ro}`);
+  assert.ok(lines.some((l) => l.includes("项目 skills (1)")), "project group header missing");
+  assert.ok(lines.some((l) => l.includes("用户级 skills (2)")), "user group header missing");
+  assert.ok(lines.some((l) => l.includes("其他（只读） (1)")), "other group header missing");
   const noauto = lines.find((l) => l.includes("no-auto"))!;
-  assert.ok(noauto.includes("（禁用自动调用）"), `no-auto row: ${noauto}`);
+  assert.ok(noauto.includes("* ") && noauto.includes("（模型禁用，只读）"), `no-auto row: ${noauto}`);
   assert.ok(lines.some((l) => l.includes("共 4 个 skill")), "footer missing");
   assert.ok(lines.some((l) => l.includes("（页 1/1）")), "page indicator missing");
+});
+
+test("render: filter showing hits in one group hides the other group headers", () => {
+  const h = openPanel(SKILLS);
+  h.panel.handleInput("/");
+  for (const ch of "local".split("")) h.panel.handleInput(ch);
+  const out = h.panel.render(80);
+  assert.ok(out.some((l) => l.includes("项目 skills (1)")), "project header shown");
+  assert.ok(!out.some((l) => l.includes("用户级")), "empty user group header must be hidden");
+  assert.ok(!out.some((l) => l.includes("brainstorming")), "brainstorming must not match 'local'");
+  void h.promise;
 });
 
 test("render: uses theme tokens (no hardcoded ANSI)", () => {
@@ -178,18 +192,22 @@ test("render: uses theme tokens (no hardcoded ANSI)", () => {
   assert.ok(!out.includes(""), "hardcoded ANSI escape in output");
 });
 
-test("space: advances state per nextState (on → off-project → on)", () => {
+test("space: advances state per nextState (on → off-project → on), row symbol updates", () => {
   const h = openPanel(SKILLS);
-  assert.equal(h.panel.skills[0].state, "on");
-  h.panel.handleInput(K.space);
-  assert.equal(h.panel.skills[0].state, "off-project");
+  // group order: [my-local-skill, brainstorming, no-auto, pkg-skill]
+  assert.equal(h.panel.skills[1].state, "on");
+  h.panel.handleInput(K.down); // → brainstorming
+  h.panel.handleInput(K.space); // on → off-project
+  assert.equal(h.panel.skills[1].state, "off-project");
   const out = h.panel.render(80).join("\n");
   const brain = out.split("\n").find((l) => l.includes("brainstorming"))!;
-  assert.ok(brain.includes("○"), "glyph not updated after toggle");
+  assert.ok(brain.includes("-p "), `symbol not updated after toggle: ${brain}`);
   h.panel.handleInput(K.space);
-  assert.equal(h.panel.skills[0].state, "on-project");
+  assert.equal(h.panel.skills[1].state, "on-project");
+  const out2 = h.panel.render(80).join("\n");
+  assert.ok(out2.split("\n").find((l) => l.includes("brainstorming"))!.includes("+p "), "on-project shows +p");
   h.panel.handleInput(K.space);
-  assert.equal(h.panel.skills[0].state, "on");
+  assert.equal(h.panel.skills[1].state, "on");
 });
 
 test("space: full cycle on → off-project → on-project → on (Task 3.5)", () => {
@@ -206,12 +224,11 @@ test("space: full cycle on → off-project → on-project → on (Task 3.5)", ()
 
 test("space: disableModelInvocation row rejected with notify, state unchanged", () => {
   const h = openPanel(SKILLS);
-  h.panel.handleInput(K.down); // my-local-skill
-  h.panel.handleInput(K.down); // pkg-skill (read-only)
-  h.panel.handleInput(K.down); // no-auto
-  const before = h.panel.skills[3].state;
+  h.panel.handleInput(K.down); // my-local-skill → brainstorming
+  h.panel.handleInput(K.down); // → no-auto (dmiv, index 2)
+  const before = h.panel.skills[2].state;
   h.panel.handleInput(K.space);
-  assert.equal(h.panel.skills[3].state, before, "state must not change");
+  assert.equal(h.panel.skills[2].state, before, "state must not change");
   assert.ok(h.notifyLog.some(([m]) => m.includes("禁用自动调用")), "no reject notify");
 });
 
@@ -220,8 +237,9 @@ test("Enter: saves changed skills to projectSettingsPath, packages preserved, su
     packages: ["earendil-works/superpowers"],
     skills: ["-other-entry"],
   });
+  h.panel.handleInput(K.down); // my-local-skill → brainstorming
   h.panel.handleInput(K.space); // brainstorming on → off-project
-  h.panel.handleInput(K.down);
+  h.panel.handleInput(K.up);
   h.panel.handleInput(K.space); // my-local-skill on → off-project
   h.panel.handleInput(K.enter);
   const result = await h.promise;
@@ -316,12 +334,11 @@ test("footer: 已更改 N 项 counts only rows whose state differs from panel op
 
 test("read-only row: space warns, no state change, Enter writes nothing for it", async () => {
   const h = openPanel(SKILLS);
-  // move to pkg-skill (index 2)
-  h.panel.handleInput(K.down);
-  h.panel.handleInput(K.down);
-  assert.equal(h.panel.skills[2].state, "read-only");
+  // move to pkg-skill (last row in group order)
+  h.panel.handleInput(K.end);
+  assert.equal(h.panel.skills[3].state, "read-only");
   h.panel.handleInput(K.space);
-  assert.equal(h.panel.skills[2].state, "read-only");
+  assert.equal(h.panel.skills[3].state, "read-only");
   assert.ok(
     h.notifyLog.some(
       ([m, k]) => m === "该 skill 无法通过 settings 切换（来自外部路径或未声明来源）" && k === "warning",
@@ -379,13 +396,13 @@ test("kitty CSI-u: Enter arrives as ESC[13u (and flag-2 ESC[13;1u) and saves (re
   const result = await expectClosed(h.promise, 'kitty CSI-u Enter "\x1b[13u"');
   assert.deepEqual(result, { changed: false, saved: false }); // Enter recognized (panel closed), no changes pending
   const h2 = openPanel(SKILLS, { packages: ["p"], skills: ["-other-entry"] });
-  h2.panel.handleInput(" "); // one toggle
+  h2.panel.handleInput(" "); // one toggle (my-local-skill, project group first)
   h2.panel.handleInput("\x1b[13u"); // second plain form
   assert.deepEqual(await expectClosed(h2.promise, 'kitty CSI-u Enter "\x1b[13u"'), { changed: true, saved: true });
   const savedSkills = readSettings(h2.settingsPath).skills as string[];
   assert.ok(
-    savedSkills.includes("-" + BRAIN_ABS),
-    `expected user pair -abs entry, got ${savedSkills}`,
+    savedSkills.includes("-" + LOCAL_REL),
+    `expected project -rel entry, got ${savedSkills}`,
   );
   // with-modifier form \x1b[13;1u (mod 1-indexed) and event-type form
   // \x1b[13;1:1u must also resolve to Enter
@@ -475,9 +492,10 @@ test("Enter: state delta from panel open is detected — on → off-project save
     packages: ["p"],
     skills: [`+${LOCAL_REL}`],
   });
-  assert.equal(h.panel.skills[0].state, "on"); // brainstorming: no override
+  assert.equal(h.panel.skills[1].state, "on"); // brainstorming: no override
+  h.panel.handleInput(K.down); // my-local-skill → brainstorming
   h.panel.handleInput(" "); // brainstorming on → off-project
-  assert.equal(h.panel.skills[0].state, "off-project");
+  assert.equal(h.panel.skills[1].state, "off-project");
   h.panel.handleInput("\r");
   assert.deepEqual(await h.promise, { changed: true, saved: true });
   const saved = readSettings(h.settingsPath);
@@ -492,10 +510,11 @@ test("Enter: state delta from panel open is detected — on → off-project save
     packages: ["p"],
     skills: [BRAIN_ABS, "-" + BRAIN_ABS, `+${LOCAL_REL}`],
   });
-  assert.equal(h2.panel.skills[0].state, "off-project");
+  assert.equal(h2.panel.skills[1].state, "off-project");
+  h2.panel.handleInput(K.down); // my-local-skill → brainstorming
   h2.panel.handleInput(" "); // off-project → on-project
   h2.panel.handleInput(" "); // on-project → on (removes the user pair entries)
-  assert.equal(h2.panel.skills[0].state, "on");
+  assert.equal(h2.panel.skills[1].state, "on");
   h2.panel.handleInput("\r");
   assert.deepEqual(await h2.promise, { changed: true, saved: true });
   const saved2 = readSettings(h2.settingsPath);
@@ -510,12 +529,11 @@ test("Enter: reverting a ⊙ on-project skill to ● on is detected (initial sta
     packages: ["p"],
     skills: [`+${LOCAL_REL}`],
   });
-  assert.equal(h.panel.skills[1].state, "on-project");
-  h.panel.handleInput("\x1b[B"); // down → my-local-skill
+  assert.equal(h.panel.skills[0].state, "on-project"); // my-local-skill is first (project group)
   // Task 3.5 cycle: on-project → on in a SINGLE toggle (previously two presses
   // were needed: on-project → off-project → on).
   h.panel.handleInput(" "); // on-project → on (removes the + entry)
-  assert.equal(h.panel.skills[1].state, "on");
+  assert.equal(h.panel.skills[0].state, "on");
   h.panel.handleInput("\r");
   assert.deepEqual(await h.promise, { changed: true, saved: true });
   const saved = readSettings(h.settingsPath);
@@ -592,9 +610,11 @@ test("render: package-kind row shows [包] tag (Task 3.5)", () => {
     description: "包内技能",
   };
   const h = openPanel([pkgSkill]);
+  const out = h.panel.render(80).join("\n");
   const line = h.panel.render(80).find((l) => l.includes("brainstorming-pkg"))!;
   assert.ok(line.includes("[包]"), `package tag missing: ${line}`);
-  assert.ok(line.includes("●"), "inherit glyph expected");
+  assert.ok(line.includes("+ "), "inherit status symbol expected");
+  assert.ok(out.includes("包内 skills (1)"), "package group header missing");
   void h.promise;
 });
 

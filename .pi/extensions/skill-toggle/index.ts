@@ -32,7 +32,7 @@
 //   sourceInfo); scan entries only fill gaps (disabled skills).
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir as osHomedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
 import type { SkillEntry } from "./core.ts";
@@ -40,6 +40,21 @@ import { applyState, clearOverrides, packageIdentity, parseSettings, planToggles
 import { openSkillsPanel } from "./ui.ts";
 
 let skillCache: SkillEntry[] = [];
+
+/**
+ * Test seam: override the home dir used by all scans (null → real
+ * os.homedir()). Tests set this to an empty temp dir so the on-demand
+ * scan never touches the real user's ~/.pi / ~/.agents.
+ */
+let homeDirOverride: string | null = null;
+
+export function setHomeDirForTests(dir: string | null): void {
+  homeDirOverride = dir;
+}
+
+function homeDir(): string {
+  return homeDirOverride ?? osHomedir();
+}
 
 /** Task 3 populates this from the session start (before_agent_start). */
 export function setSkillCache(skills: SkillEntry[]): void {
@@ -49,6 +64,10 @@ export function setSkillCache(skills: SkillEntry[]): void {
 export function getSkillCache(): SkillEntry[] {
   return skillCache;
 }
+
+/** Shared empty-result warning (exported so tests assert the exact text). */
+export const NO_SKILLS_MESSAGE =
+  "未找到可管理的 skill（已扫描项目/用户默认目录与包安装根；--skill 自定义路径的 skill 需先发送一条消息）";
 
 // --- pure helpers (unit-tested in test/skill-toggle/task3.test.ts) ----------
 
@@ -467,8 +486,9 @@ export function buildSkillCache(
   projectDir: string,
   globalSettingsPath: string,
   projectSettingsPath: string,
+  homeDirHint?: string,
 ): SkillEntry[] {
-  const home = homedir();
+  const home = homeDirHint ?? homeDir();
   const byPath = new Map<string, SkillEntry>();
   const seen = new Set<string>();
   const add = (e: SkillEntry) => {
@@ -578,8 +598,13 @@ export default function (pi: ExtensionAPI) {
   // the first trigger). The handler must never throw — on any failure the
   // cache stays empty and the /skills handler's existing empty-cache warning
   // covers it.
+  let cacheFromEvent = false;
   pi.on("before_agent_start", (event, ctx) => {
-    if (skillCache.length > 0) return;
+    // Once is enough: the first real event union (event list ∪ scans) is the
+    // complete list. If an on-demand scan already filled the cache (user ran
+    // /skills before the first message), rebuild once with the event list so
+    // custom --skill paths also appear; afterwards the cache is final.
+    if (cacheFromEvent) return;
     try {
       if (typeof event === "object" && event !== null && !("systemPromptOptions" in event)) {
         return;
@@ -587,32 +612,55 @@ export default function (pi: ExtensionAPI) {
       const opts = (event as { systemPromptOptions?: { skills?: unknown[] } }).systemPromptOptions;
       const skills = opts?.skills;
       if (!Array.isArray(skills)) return;
+      // Never overwrite a populated on-demand cache with a scan-only result:
+      // an empty event list would drop the on-demand entries (which include
+      // disabled skills the scan found) until the next non-empty event.
+      if (skills.length === 0 && skillCache.length > 0) {
+        cacheFromEvent = true;
+        return;
+      }
       skillCache = buildSkillCache(
         skills,
         ctx.cwd,
-        join(homedir(), ".pi", "agent", "settings.json"),
+        join(homeDir(), ".pi", "agent", "settings.json"),
         join(ctx.cwd, ".pi", "settings.json"),
       );
+      cacheFromEvent = true;
     } catch {
-      // Leave the cache empty; /skills notifies via the empty-cache warning.
+      // Leave as-is; the next event (or the on-demand build in requireSkills)
+      // retries.
     }
   });
 
   // --- Task 4 shared helpers ---------------------------------------------------
 
   /**
-   * Empty-cache guard shared by all four commands. skillCache is
-   * module-level and filled ONCE per process; after /reload it is NOT
-   * cleared, so this guard only covers "new session has not yet triggered
-   * before_agent_start" — panel state always comes from the settings file
-   * (resolveState), so a panel reopened after /reload is correct regardless
-   * of the cache.
+   * Shared skill-list resolver for all four commands. The cache is
+   * module-level and survives /reload within a process. When it is empty
+   * (fresh session before the first message, or the event build failed) an
+   * ON-DEMAND scan (default dirs + package install roots, empty event list)
+   * builds it — so /skills works immediately without a prior message.
+   * Only custom --skill paths are missing from a scan build; the first real
+   * before_agent_start afterwards unions them in (cacheFromEvent rebuild).
    */
   const requireSkills = (ctx: ExtensionCommandContext): SkillEntry[] | null => {
-    const skills = getSkillCache();
+    let skills = getSkillCache();
     if (skills.length === 0) {
-      ctx.ui.notify("还没加载到 skill 列表，先发一条消息后再试", "warning");
-      return null;
+      try {
+        skills = buildSkillCache(
+          [],
+          ctx.cwd,
+          join(homeDir(), ".pi", "agent", "settings.json"),
+          join(ctx.cwd, ".pi", "settings.json"),
+        );
+        if (skills.length > 0) setSkillCache(skills);
+      } catch {
+        skills = [];
+      }
+      if (skills.length === 0) {
+        ctx.ui.notify(NO_SKILLS_MESSAGE, "warning");
+        return null;
+      }
     }
     return skills;
   };

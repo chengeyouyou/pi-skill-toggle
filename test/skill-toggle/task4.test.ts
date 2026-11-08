@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 
 import extension from "../../.pi/extensions/skill-toggle/index.ts";
-import { setSkillCache } from "../../.pi/extensions/skill-toggle/index.ts";
+import { setSkillCache, setHomeDirForTests, getSkillCache, NO_SKILLS_MESSAGE } from "../../.pi/extensions/skill-toggle/index.ts";
 import { clearOverrides, planToggles } from "../../.pi/extensions/skill-toggle/core.ts";
 import type { SkillEntry } from "../../.pi/extensions/skill-toggle/core.ts";
 
@@ -361,25 +361,74 @@ test("wiring: mixed on/off keeps argument order in the success notify; skipped +
   setSkillCache([]);
 });
 
-test("wiring: empty cache → shared guard notify, no write (all four commands)", async () => {
+test("wiring: empty cache → on-demand scan builds the list; truly-empty scan → new guard notify, no write (all four commands)", async () => {
   const { handlers } = loadExtension();
   setSkillCache([]);
-  const h = ctxWithDir({ packages: [], skills: [] });
-  const before = readFileSync(h.settingsPath, "utf-8");
-  for (const [name, args] of [
-    ["skills", ""],
-    ["skills:on", "brainstorming"],
-    ["skills:off", "brainstorming"],
-    ["skills:reset", ""],
-  ] as [string, string][]) {
-    await handlers[name](args, h.ctx);
-    assert.ok(
-      h.notifyLog.some(([m, k]) => m === "还没加载到 skill 列表，先发一条消息后再试" && k === "warning"),
-      `${name}: guard notify missing: ${JSON.stringify(h.notifyLog)}`,
-    );
-    h.notifyLog.length = 0;
+  // Isolate from the real user's ~/.pi / ~/.agents so the on-demand scan
+  // finds nothing (the temp dirs below have no skill dirs of their own).
+  const emptyHome = mkdtempSync(join(tmpdir(), "skills-empty-home-"));
+  setHomeDirForTests(emptyHome);
+  try {
+    const h = ctxWithDir({ packages: [], skills: [] });
+    const before = readFileSync(h.settingsPath, "utf-8");
+    for (const [name, args] of [
+      ["skills", ""],
+      ["skills:on", "brainstorming"],
+      ["skills:off", "brainstorming"],
+      ["skills:reset", ""],
+    ] as [string, string][]) {
+      await handlers[name](args, h.ctx);
+      assert.ok(
+        h.notifyLog.some(([m, k]) => m === NO_SKILLS_MESSAGE && k === "warning"),
+        `${name}: guard notify missing: ${JSON.stringify(h.notifyLog)}`,
+      );
+      h.notifyLog.length = 0;
+    }
+    assert.equal(readFileSync(h.settingsPath, "utf-8"), before);
+  } finally {
+    setHomeDirForTests(null);
   }
-  assert.equal(readFileSync(h.settingsPath, "utf-8"), before);
+});
+
+test("wiring: empty cache but skill dirs present → on-demand scan populates cache, command works (no message needed)", async () => {
+  const { handlers } = loadExtension();
+  setSkillCache([]);
+  const emptyHome = mkdtempSync(join(tmpdir(), "skills-empty-home2-"));
+  setHomeDirForTests(emptyHome);
+  try {
+    // Create a real project skill in a fresh temp project dir.
+    const projDir = mkdtempSync(join(tmpdir(), "skills-on-demand-"));
+    const skillDir = join(projDir, ".pi", "skills", "demo-skill");
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(
+      join(skillDir, "SKILL.md"),
+      "---\nname: demo-skill\ndescription: 演示技能\n---\nbody\n",
+      "utf-8",
+    );
+    const notifyLog: [string, string?][] = [];
+    const ctx = {
+      cwd: projDir,
+      ui: { notify: (msg: string, kind?: string) => notifyLog.push([msg, kind]) },
+    };
+    // settings.json under projDir/.pi (missing → created by save).
+    await handlers["skills:on"]("demo-skill", ctx as never);
+    const cache = getSkillCache();
+    assert.ok(
+      cache.some((s) => s.name === "demo-skill"),
+      `on-demand cache must contain demo-skill: ${cache.map((s) => s.name)}`,
+    );
+    assert.equal(
+      notifyLog.at(-1)?.[0],
+      "已更新：demo-skill ✓ 开（运行 /reload 生效）",
+      `notify: ${JSON.stringify(notifyLog)}`,
+    );
+    const saved = JSON.parse(readFileSync(join(projDir, ".pi", "settings.json"), "utf-8"));
+    const expectedRel = relative(join(projDir, ".pi"), join(skillDir, "SKILL.md"));
+    assert.deepEqual(saved.skills, [`+${expectedRel}`]);
+  } finally {
+    setHomeDirForTests(null);
+    setSkillCache([]);
+  }
 });
 
 test("wiring: malformed settings.json → parse-error notify, file untouched", async () => {

@@ -215,12 +215,70 @@ function printableChar(data: string): string | undefined {
   return kittyPrintable(data);
 }
 
-const GLYPH: Record<ToggleState, string> = {
-  on: "●",
-  "on-project": "⊙",
-  "off-project": "○",
-  "read-only": "‧",
-};
+/**
+ * Status symbol (column 1): `+` enabled, `-` disabled, `*` disabled for
+ * model auto-invocation (dmiv, read-only). Scope (column 2): blank = inherit
+ * default, `p` = project-forced (on-project / off-project).
+ */
+function statusSymbol(skill: PanelSkill): string {
+  if (skill.disableModelInvocation) return "*";
+  switch (skill.state) {
+    case "off-project":
+      return "-";
+    case "on":
+    case "on-project":
+      return "+";
+    case "read-only":
+      return "+"; // readable-only rows are inherited-enabled by definition
+  }
+}
+
+function scopeMark(state: ToggleState): string {
+  return state === "on-project" || state === "off-project" ? "p" : " ";
+}
+
+const GROUP_ORDER: { kind: string; label: string }[] = [
+  { kind: "project", label: "项目 skills" },
+  { kind: "user", label: "用户级 skills" },
+  { kind: "package", label: "包内 skills" },
+  { kind: "other", label: "其他（只读）" },
+];
+
+const KIND_ORDER: Record<string, number> = { project: 0, user: 1, package: 2, other: 3 };
+
+/**
+ * Render rows grouped by kind (project → user → package → other). Empty
+ * groups are skipped (a filter showing hits in two groups renders only those
+ * headers). Group header rows are interleaved with skill rows into the
+ * flattened list that cursor/pageSlice operate on.
+ */
+interface RenderRow {
+  type: "header" | "skill";
+  skill?: PanelSkill;
+  text: string;
+}
+
+function buildRows(panel: SkillsPanel, t: PanelTheme): RenderRow[] {
+  const list = rows(panel);
+  const out: RenderRow[] = [];
+  for (const { kind, label } of GROUP_ORDER) {
+    const members = list.filter((s) => (s.kind ?? "other") === kind);
+    if (members.length === 0) continue;
+    out.push({
+      type: "header",
+      text: t.fg("muted", `── ${label} (${members.length}) ──`),
+    });
+    for (const skill of members) {
+      const text = `  ${statusSymbol(skill)}${scopeMark(skill.state)} ${skill.name}  ${sourceTag(
+        skill.source,
+      )} — ${skill.description || "（无描述）"}${
+        skill.disableModelInvocation ? "（模型禁用，只读）" : ""
+      }`;
+      out.push({ type: "skill", skill, text });
+    }
+  }
+  return out;
+}
 
 const SOURCE_TAG: Record<string, string> = {
   project: "[项目]",
@@ -302,8 +360,14 @@ export interface SkillsPanel {
 }
 
 export function createSkillsPanel(config: SkillsPanelConfig): SkillsPanel {
+  // Group order (project → user → package → other), stable within a group:
+  // the cursor must move in the same order the grouped render displays.
+  const skills = [...config.skills].sort(
+    (a, b) =>
+      (KIND_ORDER[a.kind ?? "other"] ?? 4) - (KIND_ORDER[b.kind ?? "other"] ?? 4),
+  );
   const panel: SkillsPanel = {
-    skills: config.skills,
+    skills,
     projectSettingsPath: config.projectSettingsPath,
     notify: config.notify,
     cursor: 0,
@@ -311,7 +375,7 @@ export function createSkillsPanel(config: SkillsPanelConfig): SkillsPanel {
     filterMode: false,
     theme: null,
     keybindings: null,
-    initialStates: config.skills.map((s) => s.state),
+    initialStates: skills.map((s) => s.state),
     render: (width) => renderLines(panel, width),
     invalidate: () => {},
     handleInput: (data) => {
@@ -390,6 +454,8 @@ function rows(panel: SkillsPanel): PanelSkill[] {
   return visibleSkills(panel.skills, panel.filter, (s) => s.description);
 }
 
+/** Flattened render rows (headers + skills); the cursor indexes into the SKILL subset only. */
+
 function clampCursor(cursor: number, len: number): number {
   if (len === 0) return 0;
   return Math.max(0, Math.min(cursor, len - 1));
@@ -400,9 +466,14 @@ function moveCursor(panel: SkillsPanel, delta: number): void {
   panel.cursor = clampCursor(panel.cursor + delta, len);
 }
 
-function toggleCurrent(panel: SkillsPanel): void {
+/** Skill at the cursor (skills only — group headers are not selectable). */
+function skillAtCursor(panel: SkillsPanel): PanelSkill | undefined {
   const list = rows(panel);
-  const skill = list[clampCursor(panel.cursor, list.length)];
+  return list[clampCursor(panel.cursor, list.length)];
+}
+
+function toggleCurrent(panel: SkillsPanel): void {
+  const skill = skillAtCursor(panel);
   if (!skill) return;
   if (skill.state === "read-only") {
     panel.notify("该 skill 无法通过 settings 切换（来自外部路径或未声明来源）", "warning");
@@ -481,11 +552,12 @@ function saveAndClose(panel: SkillsPanel): void {
 function renderLines(panel: SkillsPanel, width: number): string[] {
   const t: PanelTheme =
     panel.theme ?? { bold: (s) => s, fg: (_c, s) => s };
-  const list = rows(panel);
-  const cursor = clampCursor(panel.cursor, list.length);
-  const slice = pageSlice(list, cursor, VIEWPORT);
-  const cursorInSlice = list.length === 0 ? -1 : slice.indexOf(list[cursor]);
-  // Footer counts CHANGED rows (same delta as save), not "selected" (review M8).
+  const all = buildRows(panel, t);
+  const skillsOnly = all.filter((r) => r.type === "skill");
+  const cursor = clampCursor(panel.cursor, skillsOnly.length);
+  // Page over the SKILL subset; group headers of a page's skills are rendered
+  // inline (a header re-emits when its group resumes after a page break).
+  const skillSlice = pageSlice(skillsOnly, cursor, VIEWPORT);
   const changed = panel.skills.filter(
     (s, i) => s.state !== panel.initialStates[i],
   ).length;
@@ -493,35 +565,36 @@ function renderLines(panel: SkillsPanel, width: number): string[] {
 
   const lines: string[] = [];
   lines.push(t.bold(" Skills（空格切换 · / 搜索 · Enter 保存 · Esc 取消）"));
-  lines.push(
-    t.fg(
-      "muted",
-      " 状态图例: ● 默认加载   ⊙ 已覆盖(+)   ○ 已覆盖(-)   ‧ 只读",
-    ),
-  );
+  lines.push(t.fg("muted", " 状态: + 启用   - 禁用   * 模型禁用(只读)"));
+  lines.push(t.fg("muted", " 作用域: 空格=继承默认   p=本项目强制"));
   lines.push(t.fg("muted", sep));
 
-  let readonlyHeaderShown = false;
-  for (let i = 0; i < slice.length; i++) {
-    const skill = slice[i];
-    if (skill.state === "read-only" && !readonlyHeaderShown) {
-      readonlyHeaderShown = true;
-      lines.push(t.fg("dim", " 只读："));
+  // Single pass: skill rows render only when in the visible slice; a group
+  // header renders when at least one of its group's skills is in the slice
+  // (headers re-emit after a page break splits a group).
+  const sliceSet = new Set(skillSlice.map((r) => r.skill));
+  for (const row of all) {
+    if (row.type === "header") {
+      if (skillsInSliceOfGroup(all, row, sliceSet)) lines.push(row.text);
+      continue;
     }
-    const mark = i === cursorInSlice ? ">" : " ";
-    const text = ` ${mark} ${GLYPH[skill.state]} ${skill.name}  ${sourceTag(
-      skill.source,
-    )} — ${skill.description || "（无描述）"}${
-      skill.disableModelInvocation ? "（禁用自动调用）" : ""
-    }`;
-    if (skill.state === "read-only") lines.push(t.fg("dim", text));
-    else if (skill.state === "on") lines.push(text);
-    else lines.push(t.fg("accent", text)); // ⊙/○ override rows highlighted
+    const skill = row.skill as PanelSkill;
+    if (!sliceSet.has(skill)) continue;
+    const isCursor = skill === skillsOnly[cursor]?.skill;
+    const mark = isCursor ? ">" : " ";
+    const text = row.text.replace(/^  /, ` ${mark}`);
+    if (skill.state === "read-only" || skill.disableModelInvocation) {
+      lines.push(t.fg("dim", text));
+    } else if (skill.state === "on") {
+      lines.push(text);
+    } else {
+      lines.push(t.fg("accent", text)); // p (project-forced) rows highlighted
+    }
   }
-  if (slice.length === 0) lines.push(t.fg("dim", " （没有匹配的 skill）"));
+  if (skillSlice.length === 0) lines.push(t.fg("dim", " （没有匹配的 skill）"));
 
   lines.push(t.fg("muted", sep));
-  const pageCount = Math.max(1, Math.ceil(list.length / VIEWPORT));
+  const pageCount = Math.max(1, Math.ceil(skillsOnly.length / VIEWPORT));
   const curPage = Math.max(1, Math.floor(cursor / VIEWPORT) + 1);
   const footer =
     `共 ${panel.skills.length} 个 skill，已更改 ${changed} 项` +
@@ -533,6 +606,19 @@ function renderLines(panel: SkillsPanel, width: number): string[] {
     `   （页 ${curPage}/${pageCount}）`;
   lines.push(t.fg("muted", footer));
   return lines;
+}
+
+/** True if any member skill of a group header row is in the visible slice. */
+function skillsInSliceOfGroup(
+  all: RenderRow[],
+  header: RenderRow,
+  sliceSet: Set<PanelSkill>,
+): boolean {
+  for (let i = all.indexOf(header) + 1; i < all.length; i++) {
+    if (all[i].type === "header") break;
+    if (sliceSet.has(all[i].skill as PanelSkill)) return true;
+  }
+  return false;
 }
 
 function readProjectSettings(path: string): { skills: string[]; packages: unknown[] } {
