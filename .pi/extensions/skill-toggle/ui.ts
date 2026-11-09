@@ -38,6 +38,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   applyState,
   nextState,
+  packageIdentity,
   pageSlice,
   parseSettings,
   resolveState,
@@ -226,11 +227,13 @@ function statusSymbol(skill: PanelSkill): string {
   switch (skill.state) {
     case "off-project":
       return "-";
-    case "on":
     case "on-project":
+    case "on":
       return "+";
     case "read-only":
-      return "+"; // readable-only rows are inherited-enabled by definition
+      return "+"; // read-only rows are inherited-enabled by definition
+    default:
+      return ""; // defensive: state is always resolved by openSkillsPanel
   }
 }
 
@@ -259,26 +262,81 @@ interface RenderRow {
   text: string;
 }
 
+function packageShortName(identity: string): { name: string; transport: string } | null {
+  if (identity.startsWith("npm:")) {
+    // npm:<name>, scope-aware: @scope/pkg → pkg.
+    const name = identity.slice(4).replace(/^@[^/]+\//, "");
+    if (!name) return null;
+    return { name, transport: "npm" };
+  }
+  if (identity.startsWith("git:")) {
+    const m = /^git:([^/]+)\/(.+)$/.exec(identity);
+    const path = m?.[2] ?? "";
+    const name = path.split("/").filter(Boolean).pop();
+    if (!name) return null;
+    return { name, transport: "git" };
+  }
+  return null;
+}
+
+/**
+ * Package-kind rows are grouped PER PACKAGE (user request: group by which
+ * package/plugin the skill comes from, not one flat 包内 group): the group
+ * key is the pi package IDENTITY (npm:<name> / git:<host>/<path> —
+ * version- and ref-insensitive, same key pi dedupes by), and the header shows
+ * the short package name + transport.
+ */
+function packageGroupKey(skill: PanelSkill): string {
+  return packageIdentity(skill.packageSource ?? "");
+}
+
+function packageGroupHeader(identity: string): string {
+  const short = packageShortName(identity);
+  const label = short ? `${short.name}（${short.transport}）` : identity;
+  return `── 包: ${label}`;
+}
+
 function buildRows(panel: SkillsPanel, t: PanelTheme): RenderRow[] {
   const list = rows(panel);
   const out: RenderRow[] = [];
   for (const { kind, label } of GROUP_ORDER) {
     const members = list.filter((s) => (s.kind ?? "other") === kind);
     if (members.length === 0) continue;
-    out.push({
-      type: "header",
-      text: t.fg("muted", `── ${label} (${members.length}) ──`),
-    });
+    if (kind !== "package") {
+      out.push({
+        type: "header",
+        text: t.fg("muted", `── ${label} (${members.length}) ──`),
+      });
+      for (const skill of members) {
+        out.push({ type: "skill", skill, text: skillRowText(skill) });
+      }
+      continue;
+    }
+    // package: one sub-header per distinct package identity (skills are
+    // pre-sorted by packageGroupKey + name in createSkillsPanel). The header
+    // row is a normal header — skillsInSliceOfGroup handles page-break
+    // re-emission exactly like the top-level group headers.
+    let currentKey: string | null = null;
     for (const skill of members) {
-      const text = `  ${statusSymbol(skill)}${scopeMark(skill.state)} ${skill.name}  ${sourceTag(
-        skill.source,
-      )} — ${skill.description || "（无描述）"}${
-        skill.disableModelInvocation ? "（模型不自动调用）" : ""
-      }`;
-      out.push({ type: "skill", skill, text });
+      const key = packageGroupKey(skill);
+      if (key !== currentKey) {
+        currentKey = key;
+        const count = members.filter((s) => packageGroupKey(s) === key).length;
+        out.push({
+          type: "header",
+          text: t.fg("muted", `${packageGroupHeader(key)} (${count}) ──`),
+        });
+      }
+      out.push({ type: "skill", skill, text: skillRowText(skill) });
     }
   }
   return out;
+}
+
+function skillRowText(skill: PanelSkill): string {
+  return `  ${statusSymbol(skill)}${scopeMark(skill.state)} ${skill.name}  ${sourceTag(
+    skill.source,
+  )} — ${skill.description || "（无描述）"}${skill.disableModelInvocation ? "（模型不自动调用）" : ""}`;
 }
 
 const SOURCE_TAG: Record<string, string> = {
@@ -361,12 +419,21 @@ export interface SkillsPanel {
 }
 
 export function createSkillsPanel(config: SkillsPanelConfig): SkillsPanel {
-  // Group order (project → user → package → other), stable within a group:
-  // the cursor must move in the same order the grouped render displays.
-  const skills = [...config.skills].sort(
-    (a, b) =>
-      (KIND_ORDER[a.kind ?? "other"] ?? 4) - (KIND_ORDER[b.kind ?? "other"] ?? 4),
-  );
+  // Group order (project → user → package → other); package skills are
+  // further ordered by (package identity, name) so the per-package sub-groups
+  // in buildRows are contiguous. Cursor moves in display order.
+  const skills = [...config.skills].sort((a, b) => {
+    const ka = KIND_ORDER[a.kind ?? "other"] ?? 4;
+    const kb = KIND_ORDER[b.kind ?? "other"] ?? 4;
+    if (ka !== kb) return ka - kb;
+    if (ka === 2) {
+      const keyA = packageGroupKey(a);
+      const keyB = packageGroupKey(b);
+      if (keyA !== keyB) return keyA < keyB ? -1 : 1;
+      return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+    }
+    return 0;
+  });
   const panel: SkillsPanel = {
     skills,
     projectSettingsPath: config.projectSettingsPath,
@@ -567,8 +634,10 @@ function renderLines(panel: SkillsPanel, width: number): string[] {
   lines.push(t.fg("muted", sep));
 
   // Single pass: skill rows render only when in the visible slice; a group
-  // header renders when at least one of its group's skills is in the slice
-  // (headers re-emit after a page break splits a group).
+  // header (top-level or per-package sub-header) renders when at least one
+  // of its group's skills is in the slice (headers re-emit after a page
+  // break splits a group). Package sub-headers go through the SAME
+  // skillsInSliceOfGroup rule as top-level headers — no separate mechanism.
   const sliceSet = new Set(skillSlice.map((r) => r.skill));
   for (const row of all) {
     if (row.type === "header") {

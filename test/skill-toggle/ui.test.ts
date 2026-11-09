@@ -599,7 +599,7 @@ test("Enter: reverting a package skill back to inherit restores the plain string
   assert.deepEqual(saved.packages, ["git:github.com/obra/superpowers"], "object must revert to plain string");
 });
 
-test("render: package-kind row shows [包] tag (Task 3.5)", () => {
+test("render: package-kind row shows [包] tag + per-package sub-header (Task 3.5 + per-package grouping)", () => {
   const pkgBaseDir = W("C:", "u", ".pi", "agent", "git", "github.com", "obra", "superpowers");
   const pkgSkill: SkillEntry & { description?: string } = {
     name: "brainstorming-pkg",
@@ -616,7 +616,66 @@ test("render: package-kind row shows [包] tag (Task 3.5)", () => {
   const line = h.panel.render(80).find((l) => l.includes("brainstorming-pkg"))!;
   assert.ok(line.includes("[包]"), `package tag missing: ${line}`);
   assert.ok(line.includes("+ "), "inherit status symbol expected");
-  assert.ok(out.includes("包内 skills (1)"), "package group header missing");
+  assert.ok(out.includes("── 包: superpowers（git） (1) ──"), `per-package header missing: ${out}`);
+  void h.promise;
+});
+
+test("render: two skills from different packages get separate sub-headers, version/ref-insensitive keys", () => {
+  const npmBase = W("C:", "u", ".pi", "agent", "npm", "node_modules", "@quintinshaw", "pi-dynamic-workflows");
+  const npmSkill: SkillEntry & { description?: string } = {
+    name: "workflow-authoring",
+    filePath: W(npmBase, "skills", "workflow-authoring", "SKILL.md"),
+    baseDir: npmBase,
+    source: "package",
+    kind: "package",
+    packageSource: "npm:@quintinshaw/pi-dynamic-workflows@2.3.1",
+    pkgBaseDir: npmBase,
+    description: "工作流脚本",
+  };
+  const gitBase = W("C:", "u", ".pi", "agent", "git", "github.com", "obra", "superpowers");
+  const gitSkill: SkillEntry & { description?: string } = {
+    name: "brainstorming-pkg",
+    filePath: W(gitBase, "skills", "brainstorming", "SKILL.md"),
+    baseDir: gitBase,
+    source: "package",
+    kind: "package",
+    // @ref must group under the SAME header as a bare source (identity key).
+    packageSource: "git:github.com/obra/superpowers@v2",
+    pkgBaseDir: gitBase,
+    description: "包内技能",
+  };
+  const h = openPanel([gitSkill, npmSkill]);
+  const out = h.panel.render(80).join("\n");
+  assert.ok(out.includes("── 包: pi-dynamic-workflows（npm） (1) ──"), `npm header missing: ${out}`);
+  assert.ok(out.includes("── 包: superpowers（git） (1) ──"), `git header missing: ${out}`);
+  // version/ref must NOT leak into the header label
+  assert.ok(!out.includes("@v2"), `ref leaked into header: ${out}`);
+  assert.ok(!out.includes("@2.3.1"), `version leaked into header: ${out}`);
+  void h.promise;
+});
+
+test("render: package sub-header re-emits when the package spans a page break", () => {
+  const base = W("C:", "u", ".pi", "agent", "git", "github.com", "big", "pkg");
+  const mk = (n: string): SkillEntry & { description?: string } => ({
+    name: n,
+    filePath: W(base, "skills", n, "SKILL.md"),
+    baseDir: base,
+    source: "package",
+    kind: "package",
+    packageSource: "git:github.com/big/pkg",
+    pkgBaseDir: base,
+    description: "d",
+  });
+  // 12 package skills → 2 pages of 10; the same package group spans both.
+  const skills = Array.from({ length: 12 }, (_, i) => mk(`s${String(i).padStart(2, "0")}`));
+  const h = openPanel(skills);
+  const page1 = h.panel.render(80).join("\n");
+  assert.equal((page1.match(/── 包: pkg（git）/g) ?? []).length, 1, `page1 header count: ${page1}`);
+  h.panel.handleInput(K.down); // cursor to s01 (still page 1)
+  h.panel.handleInput(K.pageDown); // cursor → s10 (page 2)
+  const page2 = h.panel.render(80).join("\n");
+  assert.ok(page2.includes("── 包: pkg（git） (12) ──"), `page2 must re-emit the package sub-header: ${page2}`);
+  assert.ok(page2.includes("s10"), "s10 should be visible on page 2");
   void h.promise;
 });
 

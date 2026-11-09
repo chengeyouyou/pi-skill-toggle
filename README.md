@@ -20,7 +20,7 @@ pi install -l git:github.com/chengeyouyou/pi-skill-toggle
 ## 使用
 
 1. `/skills` — 打开面板（无需先发消息）：
-   - 按来源分 4 组：项目 / 用户级 / 包内 / 其他（只读）。
+   - 按来源分组：项目 / 用户级 / 包内（再按具体包分子组，如 `包: superpowers（git）`）/ 其他（只读）。
    - 行首两列符号：`+` 启用 / `-` 禁用；作用域空格 = 继承，`p` = 本项目强制（`+p`、`-p`）。
    - 行尾 `（模型不自动调用）` = 该 skill 带 `disable-model-invocation`，仅 `/skill:name` 手动可用；同样可切换（禁用后手动调用也失效）。
    - `↑/↓` 选择 · `Space` 切换 · `/` 过滤 · `Enter` 保存 · `Esc` 取消。
