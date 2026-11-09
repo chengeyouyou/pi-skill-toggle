@@ -33,6 +33,11 @@
 // deployment (the jiti loader aliases it only in pi's built node_modules
 // mode; Node resolution from .pi/extensions/ fails).
 import { readFileSync, unlinkSync } from "node:fs";
+// NOTE: @earendil-works/pi-tui is NOT importable here (jiti aliases it only
+// inside pi's own node_modules mode; bare-Node resolution from this file —
+// which the test suite uses — fails). Box layout therefore uses LOCAL width
+// helpers that mirror pi-tui utils.js (ANSI stripping + fullwidth counting)
+// instead of importing visibleWidth/truncateToWidth.
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import {
@@ -305,7 +310,7 @@ function buildRows(panel: SkillsPanel, t: PanelTheme): RenderRow[] {
     if (kind !== "package") {
       out.push({
         type: "header",
-        text: t.fg("muted", `── ${label} (${members.length}) ──`),
+        text: `── ${label} (${members.length}) ──`,
       });
       for (const skill of members) {
         out.push({ type: "skill", skill, text: skillRowText(skill) });
@@ -324,7 +329,7 @@ function buildRows(panel: SkillsPanel, t: PanelTheme): RenderRow[] {
         const count = members.filter((s) => packageGroupKey(s) === key).length;
         out.push({
           type: "header",
-          text: t.fg("muted", `${packageGroupHeader(key)} (${count}) ──`),
+          text: `${packageGroupHeader(key)} (${count}) ──`,
         });
       }
       out.push({ type: "skill", skill, text: skillRowText(skill) });
@@ -335,7 +340,7 @@ function buildRows(panel: SkillsPanel, t: PanelTheme): RenderRow[] {
 
 function skillRowText(skill: PanelSkill): string {
   return `  ${statusSymbol(skill)}${scopeMark(skill.state)} ${skill.name}  ${sourceTag(
-    skill.source,
+    skill,
   )} — ${skill.description || "（无描述）"}${skill.disableModelInvocation ? "（模型不自动调用）" : ""}`;
 }
 
@@ -344,12 +349,16 @@ const SOURCE_TAG: Record<string, string> = {
   user: "[全局]",
   agents: "[agents]",
   package: "[包]",
+  other: "[自定义]",
 };
 
 const VIEWPORT = 10;
 
-function sourceTag(source: string): string {
-  return SOURCE_TAG[source] ?? "[自定义]";
+/** Row tag: package-kind rows always show [包] (the per-package sub-header
+ * names the actual package); other rows fall back by source, unknown → 自定义. */
+function sourceTag(skill: PanelSkill): string {
+  if (skill.kind === "package") return SOURCE_TAG.package!;
+  return SOURCE_TAG[skill.source] ?? SOURCE_TAG.other!;
 }
 
 /**
@@ -625,13 +634,44 @@ function renderLines(panel: SkillsPanel, width: number): string[] {
   const changed = panel.skills.filter(
     (s, i) => s.state !== panel.initialStates[i],
   ).length;
-  const sep = "─".repeat(Math.min(width, 60));
+
+  // --- framed box. Width-safety rule: padding is ALWAYS computed on the
+  // plain (unstyled) text, and a style is applied to the WHOLE padded line
+  // (never to part of a line's content) — so under real ANSI themes (zero-
+  // width codes) AND marker-style test mocks every line lands at exactly the
+  // same visible width. Row state is carried by the ❯ cursor mark and the
+  // +/+/p symbols; whole-line fg gives read-only dim / project-forced accent.
+  const inner = Math.max(4, width - 2); // content columns between the borders
+  const clip = (s: string): string => (visibleWidth(s) > inner - 1 ? truncateToWidth(s, inner - 1) : s);
+  const border = (ch: string): string => t.fg("dim", ch);
+  const line = (
+    left: string,
+    content: string,
+    right: string,
+    style?: (s: string) => string,
+  ): string => {
+    const padded = padToWidth(clip(content), inner);
+    return border(left) + (style ? style(padded) : padded) + border(right);
+  };
+
+  const footerText =
+    ` 共 ${panel.skills.length} 个 skill，已更改 ${changed} 项` +
+    (panel.filterMode
+      ? `   输入过滤: ${panel.filter}▌`
+      : panel.filter
+        ? `   过滤: ${panel.filter}（/ 继续编辑）`
+        : "") +
+    `   （页 ${Math.max(1, Math.floor(cursor / VIEWPORT) + 1)}/${
+      Math.max(1, Math.ceil(skillsOnly.length / VIEWPORT))
+    }）`;
+
+  const muted = (s: string): string => t.fg("muted", s);
 
   const lines: string[] = [];
-  lines.push(t.bold(" Skills（空格切换 · / 搜索 · Enter 保存 · Esc 取消）"));
-  lines.push(t.fg("muted", " 状态: + 启用   - 禁用   行尾（模型不自动调用）= 仅 /skill:name 手动可用"));
-  lines.push(t.fg("muted", " 作用域: 空格=继承默认   p=本项目强制"));
-  lines.push(t.fg("muted", sep));
+  lines.push(line("╭", ` ${t.bold("Skills")}   空格切换 · / 搜索 · Enter 保存 · Esc 取消`, "╮", muted));
+  lines.push(line("│", "  状态: + 启用   - 禁用   行尾（模型不自动调用）= 仅手动可用", "│", muted));
+  lines.push(line("│", "  作用域: 空格=继承默认   p=本项目强制", "│", muted));
+  lines.push(line("│", " " + "─".repeat(Math.max(1, inner - 2)), "│", muted));
 
   // Single pass: skill rows render only when in the visible slice; a group
   // header (top-level or per-package sub-header) renders when at least one
@@ -641,37 +681,77 @@ function renderLines(panel: SkillsPanel, width: number): string[] {
   const sliceSet = new Set(skillSlice.map((r) => r.skill));
   for (const row of all) {
     if (row.type === "header") {
-      if (skillsInSliceOfGroup(all, row, sliceSet)) lines.push(row.text);
+      if (skillsInSliceOfGroup(all, row, sliceSet)) {
+        lines.push(line("│", " " + row.text, "│", muted));
+      }
       continue;
     }
     const skill = row.skill as PanelSkill;
     if (!sliceSet.has(skill)) continue;
     const isCursor = skill === skillsOnly[cursor]?.skill;
-    const mark = isCursor ? ">" : " ";
-    const text = row.text.replace(/^  /, ` ${mark}`);
+    const content = row.text.replace(/^  /, isCursor ? " ❯" : "   ");
     if (skill.state === "read-only") {
-      lines.push(t.fg("dim", text));
+      lines.push(line("│", content, "│", (s) => t.fg("dim", s)));
     } else if (skill.state === "on") {
-      lines.push(text);
+      lines.push(line("│", content, "│"));
     } else {
-      lines.push(t.fg("accent", text)); // p (project-forced) rows highlighted
+      lines.push(line("│", content, "│", (s) => t.fg("accent", s))); // p (project-forced) rows highlighted
     }
   }
-  if (skillSlice.length === 0) lines.push(t.fg("dim", " （没有匹配的 skill）"));
+  if (skillSlice.length === 0) {
+    lines.push(line("│", " （没有匹配的 skill）", "│", muted));
+  }
 
-  lines.push(t.fg("muted", sep));
-  const pageCount = Math.max(1, Math.ceil(skillsOnly.length / VIEWPORT));
-  const curPage = Math.max(1, Math.floor(cursor / VIEWPORT) + 1);
-  const footer =
-    `共 ${panel.skills.length} 个 skill，已更改 ${changed} 项` +
-    (panel.filterMode
-      ? `   输入过滤: ${panel.filter}▌`
-      : panel.filter
-        ? `   过滤: ${panel.filter}（/ 继续编辑）`
-        : "") +
-    `   （页 ${curPage}/${pageCount}）`;
-  lines.push(t.fg("muted", footer));
+  lines.push(line("│", footerText, "│", muted));
+  lines.push(line("╰", "", "╯"));
   return lines;
+}
+
+// --- local width helpers (pi-tui mirror; see import note) ----------------------
+
+const ANSI_RE = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\-_][0-9]*[ -/]*[@-~])/g;
+
+/** Display width: CJK/fullwidth chars count 2, ANSI escapes count 0. */
+export function visibleWidth(s: string): number {
+  let w = 0;
+  for (const ch of s.replace(ANSI_RE, "")) {
+    const c = ch.codePointAt(0) ?? 0;
+    w +=
+      (c >= 0x1100 && c <= 0x115f) ||
+      (c >= 0x2e80 && c <= 0xa4cf) ||
+      (c >= 0xac00 && c <= 0xd7a3) ||
+      (c >= 0xf900 && c <= 0xfaff) ||
+      (c >= 0xfe30 && c <= 0xfe4f) ||
+      (c >= 0xff00 && c <= 0xff60) ||
+      (c >= 0xffe0 && c <= 0xffe6) ||
+      c === 0x3000 ||
+      c === 0x00b7
+        ? 2
+        : 1;
+  }
+  return w;
+}
+
+/** Truncate to a max display width with a `…` ellipsis (width-safe). */
+export function truncateToWidth(s: string, max: number): string {
+  if (max <= 1) return max === 1 ? "…" : "";
+  if (visibleWidth(s) <= max) return s;
+  const chars = [...s];
+  let w = 0;
+  const out: string[] = [];
+  for (const ch of chars) {
+    const cw = visibleWidth(ch);
+    if (w + cw > max - 1) break;
+    out.push(ch);
+    w += cw;
+  }
+  return out.join("") + "…";
+}
+
+/** Right-pad a string with spaces to a target display width. */
+export function padToWidth(s: string, target: number): string {
+  const gap = target - visibleWidth(s);
+  return gap > 0 ? s + " ".repeat(gap) : s;
 }
 
 /** True if any member skill of a group header row is in the visible slice. */

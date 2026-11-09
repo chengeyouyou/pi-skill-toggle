@@ -16,7 +16,7 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 
-import { openSkillsPanel, type SkillsPanel } from "../../.pi/extensions/skill-toggle/ui.ts";
+import { openSkillsPanel, type SkillsPanel, visibleWidth, truncateToWidth, padToWidth } from "../../.pi/extensions/skill-toggle/ui.ts";
 import type { SkillEntry } from "../../.pi/extensions/skill-toggle/core.ts";
 
 // --- pi-tui key sequences (dist/keys.js) -------------------------------------
@@ -152,8 +152,9 @@ test("render: header, legends, two-column symbols, group headers, source tags, d
     ],
   } as never);
   const out = h.panel.render(80).join("\n");
-  assert.ok(out.includes("Skills（空格切换 · / 搜索 · Enter 保存 · Esc 取消）"), "header missing");
-  assert.ok(out.includes("状态: + 启用   - 禁用   行尾（模型不自动调用）= 仅 /skill:name 手动可用"), "status legend missing");
+  assert.ok(out.includes("Skills") && out.includes("空格切换 · / 搜索 · Enter 保存 · Esc 取消"), "title + hint missing");
+  assert.ok(out.includes("╭") && out.includes("╯") && out.includes("╰"), "box border missing");
+  assert.ok(out.includes("状态: + 启用   - 禁用   行尾（模型不自动调用）= 仅手动可用"), "status legend missing");
   assert.ok(out.includes("作用域: 空格=继承默认   p=本项目强制"), "scope legend missing");
   // group order: project first → my-local-skill (+p on-project)
   const lines = h.panel.render(80);
@@ -170,6 +171,34 @@ test("render: header, legends, two-column symbols, group headers, source tags, d
   assert.ok(noauto.includes("+ ") && noauto.includes("（模型不自动调用）"), `no-auto row: ${noauto}`);
   assert.ok(lines.some((l) => l.includes("共 4 个 skill")), "footer missing");
   assert.ok(lines.some((l) => l.includes("（页 1/1）")), "page indicator missing");
+});
+
+test("width helpers: visibleWidth counts CJK fullwidth + ignores ANSI; truncate/pad round-trip", () => {
+  assert.equal(visibleWidth("ab"), 2);
+  assert.equal(visibleWidth("中文"), 4); // CJK fullwidth = 2 each
+  assert.equal(visibleWidth("\x1b[31mab\x1b[0m"), 2); // ANSI stripped
+  assert.equal(visibleWidth("❯"), 1); // narrow geometric char (local helper semantics)
+  assert.equal(visibleWidth(""), 0);
+  assert.equal(truncateToWidth("abcdef", 10), "abcdef");
+  assert.equal(truncateToWidth("abcdef", 3), "ab…"); // ellipsis fits in 1 col
+  assert.equal(truncateToWidth("abcdef", 0), "");
+  assert.equal(truncateToWidth("abcd", 1), "…");
+  assert.equal(padToWidth("ab", 5), "ab   ");
+  assert.equal(padToWidth("abcd", 2), "abcd"); // never shrinks
+  assert.equal(visibleWidth(padToWidth("中文", 6)), 6);
+});
+
+test("render: box is aligned — every line has the same visible width as the top border (no truncation of any row)", () => {
+  const h = openPanel(SKILLS, { packages: ["p"], skills: [`+${LOCAL_REL}`, BRAIN_ABS, "-" + BRAIN_ABS] } as never);
+  const lines = h.panel.render(80).map((l) => l.replace(/\[\[[a-z]+\]\]/g, ""));
+  const top = visibleWidth(lines[0]!);
+  for (const line of lines) {
+    assert.equal(visibleWidth(line), top, `misaligned box line (${visibleWidth(line)} vs ${top}): ${line}`);
+  }
+  // every skill row must be fully visible (not truncated to …) — the fixtures
+  // all fit in 80 cols
+  for (const line of lines) assert.ok(!line.includes("…"), `row truncated: ${line}`);
+  void h.promise;
 });
 
 test("render: filter showing hits in one group hides the other group headers", () => {
